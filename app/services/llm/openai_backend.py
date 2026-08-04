@@ -15,8 +15,9 @@ BASE_URLS = {
 
 TIMEOUT = 180.0
 # without a ceiling a weaker model can loop and return tens of KB of garbage;
-# jobs with genuinely long output raise it per call
-MAX_TOKENS = 4000
+# reasoning models spend part of this budget before writing anything, so the
+# guard sits well above what the visible answer needs
+MAX_TOKENS = 8000
 
 
 def complete_json(provider: str, model: str, system: str, user: str, schema: dict,

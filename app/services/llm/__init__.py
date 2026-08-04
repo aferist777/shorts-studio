@@ -35,27 +35,81 @@ def models_for(provider: str) -> list:
 
 
 def call_json(provider: str, model: str, effort: str, system: str, user: str,
-              schema: dict, max_tokens: int = 4000) -> dict:
+              schema: dict, max_tokens: int = 8000) -> dict:
     """One structured-output call, routed to whichever backend the provider needs."""
     if provider == "anthropic":
         return anthropic_backend.complete_json(model, effort, system, user, schema, max_tokens)
     return openai_backend.complete_json(provider, model, system, user, schema, max_tokens)
 
 
-def generate_script(settings: dict, topic: str, language: str, paragraphs: int, tone: str) -> dict:
-    """-> {"title": str, "paragraphs": [str, ...]}"""
+def generate_hooks(settings: dict, topic: str, language: str, tone: str,
+                   narrator: str = "neutral", source_text: str = "") -> list:
+    """Five opening lines that differ in kind. -> [{'kind', 'text'}]"""
     data = call_json(
-        settings["llm_provider"],
-        settings["llm_model"],
+        settings["llm_provider"], settings["llm_model"],
         settings.get("llm_effort", "medium"),
-        prompts.SCRIPT_SYSTEM,
-        prompts.script_user_prompt(topic, language, paragraphs, tone),
-        prompts.SCRIPT_SCHEMA,
+        prompts.HOOKS_SYSTEM,
+        prompts.hooks_user_prompt(topic, language, tone, narrator, source_text),
+        prompts.HOOKS_SCHEMA,
+    )
+    hooks = [{"kind": h.get("kind", ""), "text": (h.get("text") or "").strip()}
+             for h in data.get("hooks", []) if (h.get("text") or "").strip()]
+    if not hooks:
+        raise RuntimeError("No hooks came back.")
+    return hooks
+
+
+def generate_script(settings: dict, topic: str, language: str, paragraphs: int,
+                    tone: str, hook: str = "", narrator: str = "neutral",
+                    source_text: str = "") -> dict:
+    """-> {"title": str, "paragraphs": [str, ...]}
+
+    With a transcript to work from the writing task is a different one — selecting
+    from ten times the material rather than inventing it — so it gets its own prompt.
+    """
+    if source_text:
+        system = prompts.SOURCE_SCRIPT_SYSTEM
+        user = prompts.source_script_user_prompt(
+            hook, topic, language, paragraphs, tone, narrator, source_text)
+    else:
+        system = prompts.SCRIPT_SYSTEM
+        user = prompts.script_user_prompt(
+            topic, language, paragraphs, tone, narrator, hook)
+
+    data = call_json(
+        settings["llm_provider"], settings["llm_model"],
+        settings.get("llm_effort", "medium"),
+        system, user, prompts.SCRIPT_SCHEMA, max_tokens=8000,
     )
     out = [p.strip() for p in data.get("paragraphs", []) if p and p.strip()]
     if not out:
         raise RuntimeError("The model returned an empty script.")
     return {"title": (data.get("title") or topic)[:80], "paragraphs": out}
+
+
+def humanize(settings: dict, paragraphs: list, narrator: str = "neutral") -> list:
+    """Second pass over freshly written narration, stripping machine tics.
+
+    A model is poor at spotting its own tells right after writing; a separate
+    pass with an explicit checklist catches what prevention alone misses.
+
+    The first paragraph is the hook the user approved, so it is never sent to be
+    cleaned — asking politely was not enough, the model reworded it anyway.
+    """
+    if len(paragraphs) < 2:
+        return list(paragraphs)
+
+    hook, rest = paragraphs[0], list(paragraphs[1:])
+    data = call_json(
+        settings["llm_provider"], settings["llm_model"],
+        settings.get("llm_effort", "medium"),
+        prompts.HUMANIZER_SYSTEM,
+        prompts.humanizer_user_prompt(rest, narrator, hook),
+        prompts.HUMANIZER_SCHEMA, max_tokens=8000,
+    )
+    cleaned = [p.strip() for p in data.get("paragraphs", []) if p and p.strip()]
+    # a pass that loses or invents paragraphs is worse than no pass
+    return [hook] + (cleaned if len(cleaned) == len(rest) else rest)
 
 
 def generate_terms(settings: dict, paragraphs: list, topic: str) -> list:

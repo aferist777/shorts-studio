@@ -105,6 +105,33 @@ class SceneCard(QFrame):
             w.setEnabled(not locked)
 
 
+class HookCard(QFrame):
+    chosen = Signal(str)
+
+    def __init__(self, hook: dict):
+        super().__init__()
+        self.setObjectName("ClipTile")
+        self.setCursor(Qt.PointingHandCursor)
+        self.text = hook.get("text", "")
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(10)
+        kind = QLabel(hook.get("kind", "")[:28])
+        kind.setObjectName("Chip")
+        kind.setFixedWidth(120)
+        kind.setAlignment(Qt.AlignCenter)
+        kind.setWordWrap(True)
+        body = QLabel(self.text)
+        body.setWordWrap(True)
+        lay.addWidget(kind, 0, Qt.AlignVCenter)
+        lay.addWidget(body, 1)
+
+    def mousePressEvent(self, event):
+        self.chosen.emit(self.text)
+        super().mousePressEvent(event)
+
+
 class ScriptStep(QWidget):
     projectChanged = Signal()
     log = Signal(str)
@@ -137,25 +164,49 @@ class ScriptStep(QWidget):
         self.source_bar.setVisible(False)
         root.addWidget(self.source_bar)
 
-        topic_row = QHBoxLayout()
-        topic_row.setSpacing(8)
         self.topic = QLineEdit()
         self.topic.setPlaceholderText("What is the video about?")
-        self.topic.returnPressed.connect(self.generate)
+        self.topic.returnPressed.connect(self.suggest_hooks)
+        root.addWidget(self.topic)
+
+        cap = QLabel("HOOK — the first line said out loud")
+        cap.setObjectName("FieldLabel")
+        root.addWidget(cap)
+
+        self.hook = GrowingTextEdit()
+        self.hook.setPlaceholderText("Write it yourself, or let the model suggest five.")
+        self.hook.textChanged.connect(self._on_hook_changed)
+        root.addWidget(self.hook)
+
+        # candidates appear here after Suggest, and vanish once one is chosen
+        self.hook_box = QWidget()
+        self.hook_layout = QVBoxLayout(self.hook_box)
+        self.hook_layout.setContentsMargins(0, 0, 0, 0)
+        self.hook_layout.setSpacing(5)
+        self.hook_box.setVisible(False)
+        root.addWidget(self.hook_box)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(8)
+        self.suggest_btn = QPushButton("Suggest hooks")
+        self.suggest_btn.setCursor(Qt.PointingHandCursor)
+        self.suggest_btn.clicked.connect(self.suggest_hooks)
         self.generate_btn = QPushButton("Generate script")
         self.generate_btn.setObjectName("Primary")
         self.generate_btn.setCursor(Qt.PointingHandCursor)
         self.generate_btn.clicked.connect(self.generate)
-        topic_row.addWidget(self.topic, 1)
-        topic_row.addWidget(self.generate_btn)
-        root.addLayout(topic_row)
+        button_row.addWidget(self.suggest_btn)
+        button_row.addStretch(1)
+        button_row.addWidget(self.generate_btn)
+        root.addLayout(button_row)
 
         opts = QHBoxLayout()
         opts.setSpacing(8)
         self.language = QComboBox()
         self.language.addItems(LANGUAGES)
         self.paragraphs = QSpinBox()
-        self.paragraphs.setRange(2, 12)
+        # a short is no longer pinned to a minute — more scenes, longer video
+        self.paragraphs.setRange(2, 30)
         self.tone = QComboBox()
         self.tone.addItems(TONES)
         self.provider = QComboBox()
@@ -220,6 +271,11 @@ class ScriptStep(QWidget):
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._tick)
 
+        self._hook_save = QTimer(self)
+        self._hook_save.setSingleShot(True)
+        self._hook_save.setInterval(600)
+        self._hook_save.timeout.connect(self.projectChanged.emit)
+
     # ---- settings plumbing -------------------------------------------------
 
     def _load_settings_into_widgets(self):
@@ -264,7 +320,12 @@ class ScriptStep(QWidget):
 
     def set_project(self, project):
         self.project = project
+        self._clear_hook_cards()
         self.topic.setText(project.topic if project else "")
+        self.hook.blockSignals(True)
+        self.hook.setPlainText(project.hook if project else "")
+        self.hook.blockSignals(False)
+        self.generate_btn.setEnabled(bool(project and project.hook.strip()))
         if project:
             if project.language in LANGUAGES:
                 self.language.setCurrentText(project.language)
@@ -272,6 +333,52 @@ class ScriptStep(QWidget):
                 self.tone.setCurrentText(project.tone)
         self._refresh_source_bar()
         self._rebuild_cards()
+
+    # ---- hooks -------------------------------------------------------------
+
+    def _on_hook_changed(self):
+        if self.project:
+            self.project.hook = self.hook.toPlainText().strip()
+            self._hook_save.start()   # debounced: saving per keystroke rebuilds the panes
+        self.generate_btn.setEnabled(bool(self.hook.toPlainText().strip()))
+
+    def _clear_hook_cards(self):
+        while self.hook_layout.count():
+            item = self.hook_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.hook_box.setVisible(False)
+
+    def suggest_hooks(self):
+        if not self.project:
+            return
+        topic = self.topic.text().strip()
+        if not topic:
+            self.topic.setFocus()
+            return
+        self.project.topic = topic
+        self._clear_hook_cards()
+        self._set_busy(True, "Writing hooks")
+        run_async(
+            self, llm.generate_hooks, self._on_hooks, self._fail,
+            self.settings, topic, self.language.currentText(),
+            self.tone.currentText(), self.project.narrator, self.project.source_text,
+        )
+
+    def _on_hooks(self, hooks: list):
+        self._clear_hook_cards()
+        for hook in hooks:
+            card = HookCard(hook)
+            card.chosen.connect(self._take_hook)
+            self.hook_layout.addWidget(card)
+        self.hook_box.setVisible(True)
+        self._set_busy(False)
+        self.log.emit(f"{len(hooks)} hooks · pick one or edit it")
+
+    def _take_hook(self, text: str):
+        self.hook.setPlainText(text)
+        self._clear_hook_cards()
+        self.projectChanged.emit()
 
     def _refresh_source_bar(self):
         project = self.project
@@ -329,9 +436,10 @@ class ScriptStep(QWidget):
 
     def _set_busy(self, busy: bool, message: str = ""):
         self.progress.setVisible(busy)
-        self.generate_btn.setEnabled(not busy)
-        for w in (self.topic, self.language, self.paragraphs, self.tone,
-                  self.provider, self.model, self.effort):
+        self.generate_btn.setEnabled(
+            not busy and bool(self.hook.toPlainText().strip()))
+        for w in (self.topic, self.hook, self.suggest_btn, self.language,
+                  self.paragraphs, self.tone, self.provider, self.model, self.effort):
             w.setEnabled(not busy)
         if busy and self.provider.currentData() != "anthropic":
             self.effort.setEnabled(False)
@@ -361,21 +469,29 @@ class ScriptStep(QWidget):
         if not self.project:
             return
         topic = self.topic.text().strip()
+        hook = self.hook.toPlainText().strip()
         if not topic:
             self.topic.setFocus()
             return
+        if not hook:
+            self.hook.setFocus()
+            return
 
         self.project.topic = topic
+        self.project.hook = hook
         self.project.language = self.language.currentText()
         self.project.tone = self.tone.currentText()
         self._persist()
+        self._clear_hook_cards()
 
+        source = self.project.source_text
         self._set_busy(True, "Writing script")
-        self.log.emit(f"Script · {self.model.currentText()} · {topic}")
+        self.log.emit(f"Script · {self.model.currentText()} · "
+                      f"{'from transcript' if source else 'from topic'} · {topic}")
         run_async(
             self, llm.generate_script, self._on_script, self._fail,
-            self.settings, topic, self.project.language,
-            self.paragraphs.value(), self.project.tone,
+            self.settings, topic, self.project.language, self.paragraphs.value(),
+            self.project.tone, hook, self.project.narrator, source,
         )
 
     def _on_script(self, result: dict):
@@ -383,7 +499,25 @@ class ScriptStep(QWidget):
         self.project.scenes = [Scene(text=p) for p in result["paragraphs"]]
         self._rebuild_cards()
         self.projectChanged.emit()
-        self.log.emit(f"Script ready · {len(self.project.scenes)} scenes · \"{self.project.title}\"")
+        self.log.emit(f"Draft · {len(self.project.scenes)} scenes · \"{self.project.title}\"")
+
+        # the cleaning pass runs every time, not behind a button
+        self._set_busy(True, "Cleaning the draft")
+        run_async(
+            self, llm.humanize, self._on_humanized, self._fail,
+            self.settings, [s.text for s in self.project.scenes], self.project.narrator,
+        )
+
+    def _on_humanized(self, paragraphs: list):
+        changed = 0
+        for scene, text in zip(self.project.scenes, paragraphs):
+            if text != scene.text:
+                changed += 1
+            scene.text = text
+        for card in self._cards:
+            card.refresh()
+        self.projectChanged.emit()
+        self.log.emit(f"Cleaned · {changed} of {len(paragraphs)} paragraphs touched")
 
         self._set_busy(True, "Picking footage keywords")
         run_async(

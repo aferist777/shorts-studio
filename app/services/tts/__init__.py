@@ -17,7 +17,9 @@ LOCALE_PREFIX = {
     "German": "de", "French": "fr", "Portuguese": "pt",
 }
 
-RATES = ["-20%", "-10%", "+0%", "+10%", "+20%"]
+# Edge applies these natively and returns word timings already at the new tempo,
+# so faster delivery costs nothing in subtitle accuracy — no ffmpeg atempo needed.
+RATES = ["-25%", "-15%", "+0%", "+15%", "+25%", "+35%", "+50%", "+60%"]
 
 # short sample used by the Preview button, per language
 SAMPLES = {

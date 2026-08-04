@@ -33,6 +33,8 @@ class Project:
     id: str = field(default_factory=new_id)
     title: str = "Untitled"
     topic: str = ""
+    hook: str = ""                               # the opening line the script is built on
+    narrator: str = "neutral"
     language: str = "Russian"
     tone: str = "Conversational"
     scenes: list = field(default_factory=list)   # list[Scene]
