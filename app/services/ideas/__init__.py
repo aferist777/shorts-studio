@@ -108,10 +108,9 @@ def transcribe_video(info: dict, settings: dict, cookies: str = "",
             progress("Downloading audio")
         audio = youtube.download_audio(info["url"], str(AUDIO_DIR), cookies, progress)
 
-        if progress:
-            progress("Re-encoding audio")
         compact = str(AUDIO_DIR / f"{info['video_id']}.mp3")
-        stt_module.compress(audio, compact, settings.get("ffmpeg_path", ""))
+        stt_module.compress(audio, compact, info.get("duration", 0),
+                            settings.get("ffmpeg_path", ""), progress)
 
         result = stt_module.transcribe(
             compact, settings.get("stt_model", stt_module.DEFAULT_MODEL), progress)

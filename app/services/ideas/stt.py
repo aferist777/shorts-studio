@@ -20,6 +20,15 @@ ENDPOINT = "https://openrouter.ai/api/v1/audio/transcriptions"
 DEFAULT_MODEL = "x-ai/grok-stt-1.0"
 TIMEOUT = 1800.0
 
+# The endpoint rejects uploads over 25 MB. Splitting the audio would mean
+# stitching two timelines back together, so instead the bitrate is chosen to
+# make the whole thing fit — one file, one set of timings.
+SIZE_LIMIT_MB = 25.0
+SIZE_BUDGET_MB = 23.5      # leave room for the container and multipart overhead
+# mp3 only encodes a fixed ladder; asking for 13 kbps gets rounded *up* to 16
+# and blows the budget, so the rung is chosen here rather than by ffmpeg
+MP3_BITRATES = (8, 16, 24, 32, 40, 48)
+
 # a cue ends on punctuation, on a pause, or when it simply runs long — the
 # opening minutes of a long file come back with no punctuation at all, so the
 # time and gap rules are what actually carry the split there
@@ -29,19 +38,54 @@ GAP_SECONDS = 0.9
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
-def compress(audio_path: str, out_path: str, ffmpeg_path: str = "") -> str:
-    """Mono 16 kHz 48 kbps mp3 — 50 minutes lands around 18 MB."""
+def pick_bitrate(duration_seconds: float) -> int:
+    """Highest mp3 rung that still fits the upload budget, in kbps.
+
+    Anything up to about an hour and a quarter keeps the full 48 kbps; longer
+    videos trade audio quality for staying in one piece. Speech survives this
+    far better than the timings would survive being split and re-joined.
+    """
+    if duration_seconds <= 0:
+        return MP3_BITRATES[-1]
+    budget = SIZE_BUDGET_MB * 8 * 1024 / duration_seconds
+    affordable = [rung for rung in MP3_BITRATES if rung <= budget]
+    return affordable[-1] if affordable else MP3_BITRATES[0]
+
+
+def pick_sample_rate(kbps: int) -> int:
+    """At the bottom of the ladder 8 kHz sounds better than 16 — fewer bands
+    to spend the same handful of bits on."""
+    return 8000 if kbps <= 16 else 16000
+
+
+def compress(audio_path: str, out_path: str, duration: float = 0.0,
+             ffmpeg_path: str = "", progress=None) -> str:
+    """Mono 16 kHz mp3, bitrate scaled so the file clears the upload limit."""
     ffmpeg = find_ffmpeg(ffmpeg_path)
     if not ffmpeg:
         raise RuntimeError("No ffmpeg found. Set its location in Settings.")
+
+    kbps = pick_bitrate(duration)
+    rate = pick_sample_rate(kbps)
+    if progress:
+        progress(f"Re-encoding audio at {kbps} kbps")
+
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
         [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", audio_path,
-         "-ac", "1", "-ar", "16000", "-b:a", "48k", out_path],
-        capture_output=True, text=True, creationflags=_NO_WINDOW, timeout=900,
+         "-ac", "1", "-ar", str(rate), "-b:a", f"{kbps}k", out_path],
+        capture_output=True, text=True, creationflags=_NO_WINDOW, timeout=1800,
     )
     if result.returncode != 0 or not Path(out_path).exists():
         raise RuntimeError("Could not re-encode the audio:\n" + (result.stderr or "")[-400:])
+
+    size_mb = Path(out_path).stat().st_size / 1e6
+    if size_mb > SIZE_LIMIT_MB:
+        raise RuntimeError(
+            f"Even at {kbps} kbps this audio is {size_mb:.0f} MB, over the "
+            f"{SIZE_LIMIT_MB:.0f} MB upload limit. The video is too long to "
+            "transcribe in one piece."
+        )
     return out_path
 
 

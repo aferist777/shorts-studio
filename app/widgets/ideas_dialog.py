@@ -109,17 +109,28 @@ class IdeasDialog(QDialog):
         title = QLabel("New ideas")
         title.setObjectName("DlgTitle")
         root.addWidget(title)
-        hint = QLabel("Paste a YouTube link. The topics inside the video become projects, "
-                      "each keeping its slice of the transcript and its timecodes.")
+        hint = QLabel("Paste a YouTube link, or pick a video you have already analysed. "
+                      "Its topics become projects, each keeping its slice of the "
+                      "transcript and its timecodes.")
         hint.setObjectName("Hint")
         hint.setWordWrap(True)
         root.addWidget(hint)
 
         url_row = QHBoxLayout()
         url_row.setSpacing(8)
-        self.url = QLineEdit()
-        self.url.setPlaceholderText("https://www.youtube.com/watch?v=…")
-        self.url.returnPressed.connect(self.analyse)
+        # editable combo: type a new link, or drop down for the ideas base
+        self.url = QComboBox()
+        self.url.setEditable(True)
+        self.url.setInsertPolicy(QComboBox.NoInsert)
+        self.url.setCompleter(None)   # or a typed link autocompletes into a saved title
+        # long video titles would otherwise stretch the whole dialog
+        # (Qt6 dropped the plain AdjustToMinimumContentsLength variant)
+        self.url.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.url.setMinimumContentsLength(12)
+        self.url.lineEdit().setPlaceholderText("https://www.youtube.com/watch?v=…")
+        self.url.lineEdit().returnPressed.connect(self.analyse)
+        self.url.activated.connect(self._pick_saved)
         self.analyse_btn = QPushButton("Analyse")
         self.analyse_btn.setObjectName("Primary")
         self.analyse_btn.setCursor(Qt.PointingHandCursor)
@@ -127,6 +138,7 @@ class IdeasDialog(QDialog):
         url_row.addWidget(self.url, 1)
         url_row.addWidget(self.analyse_btn)
         root.addLayout(url_row)
+        self._reload_saved()
 
         status_row = QHBoxLayout()
         status_row.setSpacing(8)
@@ -215,6 +227,36 @@ class IdeasDialog(QDialog):
 
     # ---- pipeline ----------------------------------------------------------
 
+    def _reload_saved(self):
+        """Fill the dropdown from the ideas base without disturbing typed text."""
+        typed = self.url.currentText()
+        self.url.blockSignals(True)
+        self.url.clear()
+        for video in ideas.load_index():
+            topics = video.get("topics", [])
+            used = sum(1 for t in topics if t.get("used_by"))
+            minutes = int(video.get("duration", 0)) // 60
+            label = f"{video.get('title', 'Untitled')}  ·  {minutes} min · {len(topics)} topics"
+            if used:
+                label += f", {used} used"
+            self.url.addItem(label, video.get("url", ""))
+        self.url.setCurrentIndex(-1)
+        self.url.setEditText(typed)
+        self.url.blockSignals(False)
+
+        # the popup inherits the field's width and would elide every title
+        metrics = self.url.view().fontMetrics()
+        widest = max((metrics.horizontalAdvance(self.url.itemText(i))
+                      for i in range(self.url.count())), default=0)
+        self.url.view().setMinimumWidth(min(760, widest + 40))
+
+    def _pick_saved(self, index: int):
+        url = self.url.itemData(index)
+        if not url:
+            return
+        self.url.setEditText(url)   # the field always shows what will be analysed
+        self.analyse()
+
     def _resize_to(self, size: tuple):
         """Grow in place rather than jumping to a corner of the screen."""
         centre = self.frameGeometry().center()
@@ -224,9 +266,10 @@ class IdeasDialog(QDialog):
         self.move(frame.topLeft())
 
     def analyse(self):
-        url = self.url.text().strip()
-        if not url:
+        url = self.url.currentText().strip()
+        if not url.startswith("http"):
             self.url.setFocus()
+            self.status.setText("Paste a link, or pick a video from the list.")
             return
         self._cost = 0.0
         self._clear_cards()
@@ -278,6 +321,7 @@ class IdeasDialog(QDialog):
         self.status.setText(note)
         self._show_video_head(entry.get("video_summary", ""))
         self._render_topics(entry.get("topics", []))
+        self._reload_saved()   # a newly analysed video joins the dropdown
 
     # ---- rendering ---------------------------------------------------------
 
