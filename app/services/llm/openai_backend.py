@@ -14,11 +14,13 @@ BASE_URLS = {
 }
 
 TIMEOUT = 180.0
-# without a ceiling a weaker model can loop and return tens of KB of garbage
+# without a ceiling a weaker model can loop and return tens of KB of garbage;
+# jobs with genuinely long output raise it per call
 MAX_TOKENS = 4000
 
 
-def complete_json(provider: str, model: str, system: str, user: str, schema: dict) -> dict:
+def complete_json(provider: str, model: str, system: str, user: str, schema: dict,
+                  max_tokens: int = MAX_TOKENS) -> dict:
     key = get_key(provider)
     if not key:
         raise RuntimeError(f"No {provider} API key. Add one in Settings.")
@@ -28,7 +30,7 @@ def complete_json(provider: str, model: str, system: str, user: str, schema: dic
 
     payload = {
         "model": model,
-        "max_tokens": MAX_TOKENS,
+        "max_tokens": max_tokens,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},

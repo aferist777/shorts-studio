@@ -2,8 +2,9 @@
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton,
-    QScrollArea, QSpinBox, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QProgressBar,
+    QPushButton, QScrollArea, QSpinBox, QStackedWidget, QTextEdit, QVBoxLayout,
+    QWidget,
 )
 
 from app.models_data import Scene
@@ -118,6 +119,23 @@ class ScriptStep(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 12, 14, 12)
         root.setSpacing(10)
+
+        # only shown for projects spawned from a video in the ideas base
+        self.source_bar = QFrame()
+        self.source_bar.setObjectName("SceneCard")
+        source_lay = QHBoxLayout(self.source_bar)
+        source_lay.setContentsMargins(12, 8, 12, 8)
+        source_lay.setSpacing(10)
+        self.source_label = QLabel()
+        self.source_label.setObjectName("ProjMeta")
+        self.source_label.setWordWrap(True)
+        source_text_btn = QPushButton("Source text…")
+        source_text_btn.setCursor(Qt.PointingHandCursor)
+        source_text_btn.clicked.connect(self._show_source_text)
+        source_lay.addWidget(self.source_label, 1)
+        source_lay.addWidget(source_text_btn)
+        self.source_bar.setVisible(False)
+        root.addWidget(self.source_bar)
 
         topic_row = QHBoxLayout()
         topic_row.setSpacing(8)
@@ -252,7 +270,44 @@ class ScriptStep(QWidget):
                 self.language.setCurrentText(project.language)
             if project.tone in TONES:
                 self.tone.setCurrentText(project.tone)
+        self._refresh_source_bar()
         self._rebuild_cards()
+
+    def _refresh_source_bar(self):
+        project = self.project
+        if not project or not project.source_text:
+            self.source_bar.setVisible(False)
+            return
+        start, end = int(project.source_start), int(project.source_end)
+        clock = lambda s: f"{s // 60:02d}:{s % 60:02d}"
+        words = len(project.source_text.split())
+        self.source_label.setText(
+            f"From “{project.source_title}” · {clock(start)}–{clock(end)} · {words} words")
+        self.source_bar.setVisible(True)
+
+    def _show_source_text(self):
+        if not self.project:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.project.source_title or "Source text")
+        dialog.resize(720, 560)
+        lay = QVBoxLayout(dialog)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(8)
+        head = QLabel(self.project.source_url)
+        head.setObjectName("Hint")
+        lay.addWidget(head)
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setPlainText(self.project.source_text)
+        lay.addWidget(view, 1)
+        close = QPushButton("Close")
+        close.clicked.connect(dialog.accept)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(close)
+        lay.addLayout(row)
+        dialog.exec()
 
     def _rebuild_cards(self):
         for card in self._cards:

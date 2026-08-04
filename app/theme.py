@@ -66,6 +66,21 @@ def qss() -> str:
     }}
     QPushButton#Primary:hover:enabled, QPushButton#AddBtn:hover:enabled {{ background: #9c8ff8; }}
 
+    /* split button — two widgets sitting flush, rounded only on the outside */
+    QPushButton#AddBtnL {{
+        color: {C['accent_ink']}; background: {C['accent']}; border: none; font-weight: 700;
+        padding: 7px 12px; border-top-left-radius: 7px; border-bottom-left-radius: 7px;
+        border-top-right-radius: 0; border-bottom-right-radius: 0;
+    }}
+    QToolButton#AddBtnR {{
+        color: {C['accent_ink']}; background: {C['accent']}; border: none; font-weight: 700;
+        padding: 7px 7px 7px 5px; font-size: 11px;
+        border-top-right-radius: 7px; border-bottom-right-radius: 7px;
+        border-top-left-radius: 0; border-bottom-left-radius: 0;
+    }}
+    QToolButton#AddBtnR::menu-indicator {{ image: none; width: 0; }}
+    QPushButton#AddBtnL:hover, QToolButton#AddBtnR:hover {{ background: #9c8ff8; }}
+
     /* disabled must read as "locked", e.g. while generating */
     QPushButton:disabled {{ color: {C['line']}; border-color: {C['line_soft']}; background: transparent; }}
     QPushButton#Primary:disabled, QPushButton#AddBtn:disabled {{

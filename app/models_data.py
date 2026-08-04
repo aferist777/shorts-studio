@@ -38,6 +38,13 @@ class Project:
     scenes: list = field(default_factory=list)   # list[Scene]
     created_at: str = ""
     updated_at: str = ""
+    # set when the project was spawned from a video in the ideas base
+    source_url: str = ""
+    source_video_id: str = ""
+    source_title: str = ""
+    source_start: float = 0.0
+    source_end: float = 0.0
+    source_text: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)

@@ -34,15 +34,17 @@ def models_for(provider: str) -> list:
     return REGISTRY.get(provider, ("", []))[1]
 
 
-def _call_json(provider: str, model: str, effort: str, system: str, user: str, schema: dict) -> dict:
+def call_json(provider: str, model: str, effort: str, system: str, user: str,
+              schema: dict, max_tokens: int = 4000) -> dict:
+    """One structured-output call, routed to whichever backend the provider needs."""
     if provider == "anthropic":
-        return anthropic_backend.complete_json(model, effort, system, user, schema)
-    return openai_backend.complete_json(provider, model, system, user, schema)
+        return anthropic_backend.complete_json(model, effort, system, user, schema, max_tokens)
+    return openai_backend.complete_json(provider, model, system, user, schema, max_tokens)
 
 
 def generate_script(settings: dict, topic: str, language: str, paragraphs: int, tone: str) -> dict:
     """-> {"title": str, "paragraphs": [str, ...]}"""
-    data = _call_json(
+    data = call_json(
         settings["llm_provider"],
         settings["llm_model"],
         settings.get("llm_effort", "medium"),
@@ -60,7 +62,7 @@ def generate_terms(settings: dict, paragraphs: list, topic: str) -> list:
     """-> [[str, ...], ...] aligned with `paragraphs` (padded if the model is short)."""
     numbered = "\n\n".join(f"[{i + 1}] {p}" for i, p in enumerate(paragraphs))
     user = f"Overall topic: {topic}\n\nParagraphs:\n{numbered}"
-    data = _call_json(
+    data = call_json(
         settings["llm_provider"],
         settings["llm_model"],
         "low",  # keyword extraction is not reasoning-heavy
@@ -77,7 +79,7 @@ def generate_terms(settings: dict, paragraphs: list, topic: str) -> list:
 def rewrite_paragraph(settings: dict, topic: str, language: str, tone: str,
                       script: list, index: int) -> dict:
     """-> {"paragraph": str, "terms": [str, ...]} for one scene, in context."""
-    data = _call_json(
+    data = call_json(
         settings["llm_provider"],
         settings["llm_model"],
         settings.get("llm_effort", "medium"),

@@ -25,11 +25,12 @@ def _client():
     return anthropic.Anthropic(api_key=key)
 
 
-def complete_json(model: str, effort: str, system: str, user: str, schema: dict) -> dict:
+def complete_json(model: str, effort: str, system: str, user: str, schema: dict,
+                  max_tokens: int = MAX_TOKENS) -> dict:
     client = _client()
     response = client.messages.create(
         model=model,
-        max_tokens=MAX_TOKENS,
+        max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],
         output_config={

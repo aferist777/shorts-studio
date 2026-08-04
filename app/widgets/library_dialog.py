@@ -38,7 +38,8 @@ class LibraryRow(QFrame):
         self.check.setToolTip("Include in the render queue"
                               if info["state"] != library.DRAFT
                               else "Needs a voice-over and footage first")
-        self.check.stateChanged.connect(self.toggled.emit)
+        # stateChanged carries an int; a zero-argument Signal cannot take it directly
+        self.check.stateChanged.connect(lambda _: self.toggled.emit())
 
         self.thumb = QLabel()
         self.thumb.setObjectName("ClipThumb")
@@ -149,6 +150,7 @@ class LibraryDialog(QDialog):
         self.render_btn = QPushButton("Render selected")
         self.render_btn.setObjectName("Primary")
         self.render_btn.setCursor(Qt.PointingHandCursor)
+        self.render_btn.setMinimumWidth(150)   # same reason as the ideas dialog
         self.render_btn.setEnabled(False)
         self.render_btn.clicked.connect(self.render_selected)
         head.addWidget(self.render_btn)

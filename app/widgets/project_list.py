@@ -2,7 +2,8 @@
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from app.theme import C
@@ -56,6 +57,7 @@ class ProjectListPane(QWidget):
     addRequested = Signal()
     deleteRequested = Signal(str)
     libraryRequested = Signal()
+    ideasRequested = Signal()
 
     def __init__(self, store):
         super().__init__()
@@ -80,15 +82,33 @@ class ProjectListPane(QWidget):
         videos.setCursor(Qt.PointingHandCursor)
         videos.setToolTip("All renders and the batch queue  (Ctrl+L)")
         videos.clicked.connect(self.libraryRequested.emit)
+
+        # split button: the left half acts, the right half offers the other way in
         add = QPushButton("New")
-        add.setObjectName("AddBtn")
+        add.setObjectName("AddBtnL")
         add.setCursor(Qt.PointingHandCursor)
         add.clicked.connect(self.addRequested.emit)
+
+        more = QToolButton()
+        more.setObjectName("AddBtnR")
+        more.setCursor(Qt.PointingHandCursor)
+        more.setPopupMode(QToolButton.InstantPopup)
+        more.setText("▾")
+        menu = QMenu(more)
+        menu.addAction("New project", self.addRequested.emit)
+        menu.addAction("New ideas…", self.ideasRequested.emit)
+        more.setMenu(menu)
+
+        split = QHBoxLayout()
+        split.setSpacing(0)
+        split.addWidget(add)
+        split.addWidget(more)
+
         hl.addWidget(title)
         hl.addWidget(self.count)
         hl.addStretch(1)
         hl.addWidget(videos)
-        hl.addWidget(add)
+        hl.addLayout(split)
         root.addWidget(head)
 
         self.scroll = QScrollArea()

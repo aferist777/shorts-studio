@@ -44,6 +44,31 @@ class Store:
         project.updated_at = _now()
         self.save()
 
+    def create_from_topic(self, video: dict, topic: dict, language: str = "Russian",
+                          tone: str = "Conversational") -> Project:
+        """A project born out of one topic in an analysed video.
+
+        `topic` is the title, so the existing topic-driven script generation works
+        straight away; the transcript slice sits alongside for later phases.
+        """
+        project = Project(
+            title=topic.get("project_name") or topic.get("title", "Untitled"),
+            topic=topic.get("title", ""),
+            language=language,
+            tone=tone,
+            created_at=_now(),
+            updated_at=_now(),
+            source_url=video.get("url", ""),
+            source_video_id=video.get("video_id", ""),
+            source_title=video.get("title", ""),
+            source_start=float(topic.get("start", 0)),
+            source_end=float(topic.get("end", 0)),
+            source_text=topic.get("text", ""),
+        )
+        self.projects.insert(0, project)
+        self.save()
+        return project
+
     def duplicate(self, project_id: str) -> Project:
         """Copy the script, drop the media.
 
