@@ -46,9 +46,8 @@ a different opening, it is the wrong paragraph.
 the comments".
 - Vary sentence rhythm and structure between runs; do not fall into a fixed template.
 
-Write in the language you are asked for, and in that language only."""
-
-SCRIPT_SYSTEM += "\n\n" + NO_MACHINE_VOICE
+Write in the language you are asked for, and in that language only. Follow the narrator \
+you are given."""
 
 TERMS_SYSTEM = """You pick stock-footage search keywords for a video narration.
 
@@ -59,13 +58,13 @@ narration is not."""
 
 
 def script_user_prompt(topic: str, language: str, paragraphs: int, tone: str,
-                       narrator: str = "neutral", hook: str = "") -> str:
+                       narrator_block: str = "", hook: str = "") -> str:
     return (
         f"Topic: {topic}\n"
         f"Language: {language}\n"
         f"Tone: {tone}\n"
-        f"Narrator: {narrator_style(narrator)}\n"
         f"Paragraphs: exactly {paragraphs}, the first being the hook\n\n"
+        f"{narrator_block}\n\n"
         f"The hook, already chosen:\n{hook}\n\n"
         f"Write the narration."
     )
@@ -130,18 +129,83 @@ REWRITE_SCHEMA = {
 
 
 # ---- narrators -------------------------------------------------------------
-# One entry for now. Later phases let the user build these from sample texts,
-# so the prompt already assembles a narrator layer rather than hard-coding voice.
-NARRATORS = {
-    "neutral": {
-        "label": "Neutral",
-        "style": "Write plainly and let the material carry the interest.",
+# The neutral narrator carries the anti-machine rules. A narrator built from real
+# writing replaces them with its own profile instead of stacking on top: a profile
+# already says what its author never does, and one voice per prompt beats two sets
+# of rules arguing about precedence.
+NEUTRAL_BLOCK = ("Write plainly and let the material carry the interest.\n\n"
+                 + NO_MACHINE_VOICE)
+
+NARRATOR_ANALYSIS_SYSTEM = """You read several texts by one author and describe how that \
+author writes, so another writer can produce new work in the same voice.
+
+Describe HOW they write, never WHAT they wrote about. If a subject from the samples \
+appears in your description, you have gone wrong — the profile has to fit a topic the \
+author never touched.
+
+Quote from the samples. Every observation needs a short quotation showing it; where you \
+cannot quote, you invented the observation and should drop it.
+
+Be specific and behavioural. "Ironic and lively" is useless. "Undersells catastrophes — \
+calls a massacre an unpleasantness, an empire an outfit" can be followed.
+
+The negative space matters as much as the rest: what this author consistently does not do \
+is part of the voice.
+
+Write the profile in the same language as the samples."""
+
+NARRATOR_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string", "description": "Two sentences: who this voice is"},
+        "sentences": {"type": "string", "description": "Sentence architecture and length"},
+        "rhythm": {"type": "string", "description": "Pacing — where it slows and speeds up"},
+        "address": {"type": "string", "description": "Person used, how it treats the audience"},
+        "register": {"type": "string", "description": "Vocabulary and level of formality"},
+        "imagery": {"type": "string", "description": "What areas its metaphors come from"},
+        "humour": {"type": "string", "description": "Kind of humour, or its absence"},
+        "openings": {"type": "string", "description": "How it starts a piece"},
+        "endings": {"type": "string", "description": "How it lands a piece"},
+        "stance": {"type": "string", "description": "Its attitude towards the subject"},
+        "signature_moves": {"type": "array", "items": {"type": "string"},
+                            "description": "Recurring devices, with a quotation each"},
+        "never_does": {"type": "array", "items": {"type": "string"},
+                       "description": "What this author consistently avoids"},
     },
+    "required": ["summary", "sentences", "rhythm", "address", "register", "imagery",
+                 "humour", "openings", "endings", "stance", "signature_moves",
+                 "never_does"],
+    "additionalProperties": False,
 }
 
+_PROFILE_ROWS = [
+    ("sentences", "Sentences"), ("rhythm", "Rhythm"), ("address", "Address"),
+    ("register", "Register"), ("imagery", "Imagery"), ("humour", "Humour"),
+    ("openings", "Openings"), ("endings", "Endings"), ("stance", "Stance"),
+]
 
-def narrator_style(narrator: str) -> str:
-    return NARRATORS.get(narrator or "neutral", NARRATORS["neutral"])["style"]
+
+def render_profile(profile: dict) -> str:
+    """A stored analysis, turned back into prompt text."""
+    lines = [f"Write as this narrator.\n\n{profile.get('summary', '').strip()}"]
+    for key, label in _PROFILE_ROWS:
+        value = (profile.get(key) or "").strip()
+        if value:
+            lines.append(f"{label}: {value}")
+    moves = [m.strip() for m in profile.get("signature_moves", []) if m.strip()]
+    if moves:
+        lines.append("Signature moves:\n" + "\n".join(f"- {m}" for m in moves))
+    never = [n.strip() for n in profile.get("never_does", []) if n.strip()]
+    if never:
+        lines.append("Never does:\n" + "\n".join(f"- {n}" for n in never))
+    lines.append("This governs how things are said. It never governs what is true — "
+                 "facts come from the material, not from the voice.")
+    return "\n\n".join(lines)
+
+
+def narrator_analysis_user_prompt(samples: list) -> str:
+    blocks = "\n\n---\n\n".join(f"[Sample {i + 1}]\n{s}" for i, s in enumerate(samples))
+    return f"{len(samples)} texts by the same author:\n\n{blocks}\n\nDescribe the voice."
 
 
 # ---- hooks -----------------------------------------------------------------
@@ -161,9 +225,7 @@ Give five hooks that differ in KIND, not in wording. Between them use:
 Each is one or two spoken sentences. No preamble, no "in this video", no greeting. \
 Never promise something the material cannot deliver.
 
-Write in the language you are asked for.
-
-{NO_MACHINE_VOICE}"""
+Write in the language you are asked for, and follow the narrator you are given."""
 
 HOOKS_SCHEMA = {
     "type": "object",
@@ -190,10 +252,10 @@ HOOKS_SCHEMA = {
 }
 
 
-def hooks_user_prompt(topic: str, language: str, tone: str, narrator: str,
+def hooks_user_prompt(topic: str, language: str, tone: str, narrator_block: str,
                       source_text: str = "") -> str:
     parts = [f"Topic: {topic}", f"Language: {language}", f"Tone: {tone}",
-             f"Narrator: {narrator_style(narrator)}"]
+             f"\n{narrator_block}\n"]
     if source_text:
         parts.append(
             "\nThe video is built on this source material. Every hook must be "
@@ -226,23 +288,21 @@ as the language allows. Do not rewrite it and do not preface it.
 under a different opening, it is the wrong paragraph.
 - The last paragraph lands the point the hook promised. No "subscribe", no moral.
 
-It is spoken aloud: short sentences, concrete nouns, no bullet points, no headings, no \
-emoji, no stage directions, no speaker labels. Each paragraph reads in five to nine \
-seconds.
+It is spoken aloud: no bullet points, no headings, no emoji, no stage directions, no \
+speaker labels. Each paragraph reads in five to nine seconds.
 
-{NO_MACHINE_VOICE}
-
-Write in the language you are asked for, and in that language only."""
+Write in the language you are asked for, and in that language only. Follow the narrator \
+you are given."""
 
 
 def source_script_user_prompt(hook: str, topic: str, language: str, paragraphs: int,
-                              tone: str, narrator: str, source_text: str) -> str:
+                              tone: str, narrator_block: str, source_text: str) -> str:
     return (
         f"Topic: {topic}\n"
         f"Language: {language}\n"
         f"Tone: {tone}\n"
-        f"Narrator: {narrator_style(narrator)}\n"
         f"Paragraphs: exactly {paragraphs}, the first being the hook\n\n"
+        f"{narrator_block}\n\n"
         f"The hook, already chosen:\n{hook}\n\n"
         f"Source transcript:\n{source_text}\n\n"
         f"Write the narration."
@@ -251,12 +311,11 @@ def source_script_user_prompt(hook: str, topic: str, language: str, paragraphs: 
 
 # ---- the cleaning pass -----------------------------------------------------
 
-HUMANIZER_SYSTEM = f"""You are an editor. You are given narration that a language model \
-just wrote, and you remove the machine out of it without removing the writer.
+HUMANIZER_SYSTEM = """You are an editor. You are given narration a language model just \
+wrote, and you bring it into line with the narrator it was supposed to be written as — \
+taking out anything that sounds like a machine rather than that voice.
 
-{NO_MACHINE_VOICE}
-
-Two things matter as much as the list above:
+Two things matter as much as the narrator's own rules:
 
 Keep the meaning and the facts exactly. You are changing how it sounds, not what it says. \
 Do not add a fact, drop a fact, or shift a claim.
@@ -282,9 +341,9 @@ HUMANIZER_SCHEMA = {
 }
 
 
-def humanizer_user_prompt(paragraphs: list, narrator: str, hook: str = "") -> str:
+def humanizer_user_prompt(paragraphs: list, narrator_block: str, hook: str = "") -> str:
     numbered = "\n\n".join(f"[{i + 1}] {p}" for i, p in enumerate(paragraphs))
-    head = f"Narrator: {narrator_style(narrator)}\n"
+    head = f"{narrator_block}\n"
     if hook:
         head += f"\nThe opening line, fixed and not to be returned:\n{hook}\n"
     return f"{head}\nClean these {len(paragraphs)} paragraphs:\n\n{numbered}"

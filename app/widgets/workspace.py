@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models_data import Scene
-from app.services import llm
+from app.services import llm, narrators
 from app.services.worker import run_async
 from app.widgets.footage_step import FootageStep
 from app.widgets.render_step import RenderStep
@@ -209,6 +209,8 @@ class ScriptStep(QWidget):
         self.paragraphs.setRange(2, 30)
         self.tone = QComboBox()
         self.tone.addItems(TONES)
+        self.narrator = QComboBox()
+        self.narrator.setToolTip("How the script is written — not the voice that reads it")
         self.provider = QComboBox()
         for pid, (label, _) in llm.REGISTRY.items():
             self.provider.addItem(label, pid)
@@ -220,6 +222,7 @@ class ScriptStep(QWidget):
             ("LANGUAGE", self.language, 1),
             ("SCENES", self.paragraphs, 0),
             ("TONE", self.tone, 1),
+            ("NARRATOR", self.narrator, 1),
             ("PROVIDER", self.provider, 1),
             ("MODEL", self.model, 2),
             ("EFFORT", self.effort, 0),
@@ -233,7 +236,9 @@ class ScriptStep(QWidget):
             opts.addLayout(col, stretch)
         root.addLayout(opts)
 
+        self.reload_narrators()
         self._load_settings_into_widgets()
+        self.narrator.currentIndexChanged.connect(self._on_narrator_changed)
         self.provider.currentIndexChanged.connect(self._on_provider_changed)
         for w in (self.language, self.tone, self.model, self.effort):
             w.currentIndexChanged.connect(self._persist)
@@ -299,6 +304,23 @@ class ScriptStep(QWidget):
             self.model.setCurrentText(select)
         self.model.blockSignals(False)
 
+    def reload_narrators(self):
+        """Called on start and whenever the narrators dialog changes anything."""
+        wanted = self.narrator.currentData() or (
+            self.project.narrator if self.project else "neutral")
+        self.narrator.blockSignals(True)
+        self.narrator.clear()
+        for narrator_id, name in narrators.choices():
+            self.narrator.addItem(name, narrator_id)
+        index = self.narrator.findData(wanted)
+        self.narrator.setCurrentIndex(max(0, index))
+        self.narrator.blockSignals(False)
+
+    def _on_narrator_changed(self):
+        if self.project:
+            self.project.narrator = self.narrator.currentData() or "neutral"
+            self.projectChanged.emit()
+
     def _on_provider_changed(self):
         self._reload_models()
         self.effort.setEnabled(self.provider.currentData() == "anthropic")
@@ -331,6 +353,10 @@ class ScriptStep(QWidget):
                 self.language.setCurrentText(project.language)
             if project.tone in TONES:
                 self.tone.setCurrentText(project.tone)
+            self.narrator.blockSignals(True)
+            index = self.narrator.findData(project.narrator or "neutral")
+            self.narrator.setCurrentIndex(max(0, index))
+            self.narrator.blockSignals(False)
         self._refresh_source_bar()
         self._rebuild_cards()
 
@@ -622,6 +648,9 @@ class WorkspacePane(QWidget):
 
     def refresh_render_readiness(self):
         self.render.set_project(self.script.project)
+
+    def reload_narrators(self):
+        self.script.reload_narrators()
 
     def set_project(self, project):
         self.script.set_project(project)

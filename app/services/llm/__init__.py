@@ -5,7 +5,7 @@ official SDK, everything OpenAI-shaped goes through plain HTTP. They are never
 mixed.
 """
 
-from app.services import prompts
+from app.services import narrators, prompts
 from app.services.llm import anthropic_backend, openai_backend
 
 # provider -> (label, [model ids]). First model is the default.
@@ -49,7 +49,8 @@ def generate_hooks(settings: dict, topic: str, language: str, tone: str,
         settings["llm_provider"], settings["llm_model"],
         settings.get("llm_effort", "medium"),
         prompts.HOOKS_SYSTEM,
-        prompts.hooks_user_prompt(topic, language, tone, narrator, source_text),
+        prompts.hooks_user_prompt(topic, language, tone,
+                                  narrators.style_block(narrator), source_text),
         prompts.HOOKS_SCHEMA,
     )
     hooks = [{"kind": h.get("kind", ""), "text": (h.get("text") or "").strip()}
@@ -67,14 +68,15 @@ def generate_script(settings: dict, topic: str, language: str, paragraphs: int,
     With a transcript to work from the writing task is a different one — selecting
     from ten times the material rather than inventing it — so it gets its own prompt.
     """
+    block = narrators.style_block(narrator)
     if source_text:
         system = prompts.SOURCE_SCRIPT_SYSTEM
         user = prompts.source_script_user_prompt(
-            hook, topic, language, paragraphs, tone, narrator, source_text)
+            hook, topic, language, paragraphs, tone, block, source_text)
     else:
         system = prompts.SCRIPT_SYSTEM
         user = prompts.script_user_prompt(
-            topic, language, paragraphs, tone, narrator, hook)
+            topic, language, paragraphs, tone, block, hook)
 
     data = call_json(
         settings["llm_provider"], settings["llm_model"],
@@ -104,12 +106,27 @@ def humanize(settings: dict, paragraphs: list, narrator: str = "neutral") -> lis
         settings["llm_provider"], settings["llm_model"],
         settings.get("llm_effort", "medium"),
         prompts.HUMANIZER_SYSTEM,
-        prompts.humanizer_user_prompt(rest, narrator, hook),
+        prompts.humanizer_user_prompt(rest, narrators.style_block(narrator), hook),
         prompts.HUMANIZER_SCHEMA, max_tokens=8000,
     )
     cleaned = [p.strip() for p in data.get("paragraphs", []) if p and p.strip()]
     # a pass that loses or invents paragraphs is worse than no pass
     return [hook] + (cleaned if len(cleaned) == len(rest) else rest)
+
+
+def analyse_narrator(settings: dict, samples: list) -> dict:
+    """Describe one author's voice from their own writing. -> the profile dict."""
+    texts = [s["text"] for s in samples if s.get("text", "").strip()]
+    if not texts:
+        raise RuntimeError("No sample texts to analyse.")
+
+    return call_json(
+        settings["llm_provider"], settings["llm_model"],
+        settings.get("llm_effort", "medium"),
+        prompts.NARRATOR_ANALYSIS_SYSTEM,
+        prompts.narrator_analysis_user_prompt(texts),
+        prompts.NARRATOR_SCHEMA, max_tokens=16000,
+    )
 
 
 def generate_terms(settings: dict, paragraphs: list, topic: str) -> list:

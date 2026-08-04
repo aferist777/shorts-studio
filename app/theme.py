@@ -237,6 +237,16 @@ def qss() -> str:
     QMenu::item:selected {{ background: {C['accent_dim']}; color: {C['ink']}; }}
     QMenu::separator {{ height: 1px; background: {C['line_soft']}; margin: 6px 8px; }}
 
+    QListWidget {{
+        background: {C['bg']}; border: 1px solid {C['line_soft']}; border-radius: 9px;
+        padding: 5px; outline: none;
+    }}
+    QListWidget::item {{
+        padding: 8px 10px; border-radius: 6px; color: {C['ink_dim']};
+    }}
+    QListWidget::item:hover {{ background: {C['surface']}; color: {C['ink']}; }}
+    QListWidget::item:selected {{ background: {C['accent_dim']}; color: {C['ink']}; }}
+
     QDialog {{ background: {C['surface']}; }}
     QDialog QLabel#DlgTitle {{ font-size: 14px; font-weight: 600; }}
     QFrame#Sep {{ background: {C['line_soft']}; max-height: 1px; border: none; }}

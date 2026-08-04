@@ -19,6 +19,7 @@ from app.theme import qss
 from app.version import APP_NAME, APP_VERSION
 from app.widgets.ideas_dialog import IdeasDialog
 from app.widgets.library_dialog import LibraryDialog
+from app.widgets.narrators_dialog import NarratorsDialog
 from app.widgets.preview import PreviewPane
 from app.widgets.project_list import ProjectListPane
 from app.widgets.settings_dialog import SettingsDialog
@@ -87,6 +88,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction("Duplicate script", self.duplicate_project)
         file_menu.addSeparator()
         file_menu.addAction("Videos…", self.open_library).setShortcut("Ctrl+L")
+        file_menu.addAction("Narrators…", self.open_narrators).setShortcut("Ctrl+N")
         file_menu.addSeparator()
         file_menu.addAction("Settings…", self.open_settings)
         file_menu.addSeparator()
@@ -158,6 +160,12 @@ class MainWindow(QMainWindow):
         if project_ids:
             self.left.select(project_ids[0])
         self.right.append_log(f"Created {len(project_ids)} projects from a video.")
+
+    def open_narrators(self):
+        dialog = NarratorsDialog(self.settings, self)
+        dialog.changed.connect(self.center.reload_narrators)
+        dialog.exec()
+        self.center.reload_narrators()
 
     def open_library(self):
         dialog = LibraryDialog(self.store, self.settings, self)
