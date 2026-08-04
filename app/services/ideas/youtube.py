@@ -16,7 +16,8 @@ _VTT_TIME_RE = re.compile(
 
 
 def _options(cookies: str = "") -> dict:
-    opts = {"skip_download": True, "quiet": True, "no_warnings": True}
+    # noprogress: yt-dlp writes its own progress bar to stdout otherwise
+    opts = {"skip_download": True, "quiet": True, "no_warnings": True, "noprogress": True}
     if cookies:
         opts["cookiefile"] = cookies
     return opts
@@ -50,37 +51,29 @@ def fetch_info(url: str, cookies: str = "") -> dict:
     }
 
 
-def pick_track(info: dict) -> dict:
-    """Best available subtitle track, or {} when the video has none.
+def pick_manual_track(info: dict) -> dict:
+    """A human-made subtitle track, or {} if the video only has generated ones.
 
-    Manual beats automatic, and the original-language auto track beats the
-    machine-translated one — YouTube exposes both and `ru` may well be a
-    translation of an English original.
+    Automatic captions are deliberately ignored. They mangle exactly the words
+    that carry the content — on a video about David and Goliath they never once
+    produced "Голиаф" — so speech-to-text is the primary path and this is only
+    the fallback for videos that ship real subtitles.
     """
     lang = info.get("language") or "en"
     manual = info.get("subtitles") or {}
-    auto = info.get("automatic_captions") or {}
+    if not manual:
+        return {}
 
-    candidates = [
-        (manual, lang, "subtitles"),
-        (manual, "en", "subtitles"),
-        (auto, f"{lang}-orig", "auto-captions"),
-        (auto, lang, "auto-captions"),
-        (auto, "en-orig", "auto-captions"),
-        (auto, "en", "auto-captions"),
-    ]
-    if manual:
-        first = sorted(manual.keys())[0]
-        candidates.insert(2, (manual, first, "subtitles"))
-
-    for pool, key, kind in candidates:
-        formats = pool.get(key)
+    order = [lang, "en", *sorted(manual.keys())]
+    for key in order:
+        formats = manual.get(key)
         if not formats:
             continue
         for ext in ("json3", "vtt"):
             match = next((f for f in formats if f.get("ext") == ext and f.get("url")), None)
             if match:
-                return {"url": match["url"], "ext": ext, "language": key, "kind": kind}
+                return {"url": match["url"], "ext": ext, "language": key,
+                        "kind": "subtitles"}
     return {}
 
 

@@ -7,9 +7,12 @@ from PySide6.QtWidgets import (
 )
 
 from app.services import ideas
-from app.services.ideas.transcribe import MODEL_SIZES
 from app.services.worker import run_async
 from app.widgets.workspace import LANGUAGES, TONES
+
+# the dialog opens as a link box and only grows once there is a list to show
+SMALL = (560, 210)
+LARGE = (900, 760)
 
 
 def _clock(seconds: float) -> str:
@@ -88,7 +91,7 @@ class IdeasDialog(QDialog):
     def __init__(self, store, settings: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle("New ideas")
-        self.resize(860, 720)
+        self.resize(*SMALL)
         self.store = store
         self.settings = settings
         self._info = {}
@@ -97,6 +100,7 @@ class IdeasDialog(QDialog):
         self._cards = []
         self._elapsed = 0
         self._message = ""
+        self._cost = 0.0
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 14, 16, 14)
@@ -134,28 +138,6 @@ class IdeasDialog(QDialog):
         status_row.addWidget(self.progress, 1)
         status_row.addWidget(self.status)
         root.addLayout(status_row)
-
-        self.whisper_box = QFrame()
-        self.whisper_box.setObjectName("SceneCard")
-        whisper_lay = QHBoxLayout(self.whisper_box)
-        whisper_lay.setContentsMargins(12, 10, 12, 10)
-        whisper_lay.setSpacing(10)
-        self.whisper_label = QLabel()
-        self.whisper_label.setWordWrap(True)
-        self.whisper_model = QComboBox()
-        self.whisper_model.addItems(MODEL_SIZES)
-        self.whisper_model.setCurrentText(settings.get("whisper_model", "small"))
-        transcribe_btn = QPushButton("Transcribe")
-        transcribe_btn.setObjectName("Primary")
-        transcribe_btn.clicked.connect(self.run_whisper)
-        skip_btn = QPushButton("Skip")
-        skip_btn.clicked.connect(lambda: self.whisper_box.setVisible(False))
-        whisper_lay.addWidget(self.whisper_label, 1)
-        whisper_lay.addWidget(self.whisper_model)
-        whisper_lay.addWidget(transcribe_btn)
-        whisper_lay.addWidget(skip_btn)
-        self.whisper_box.setVisible(False)
-        root.addWidget(self.whisper_box)
 
         self.video_head = QLabel()
         self.video_head.setWordWrap(True)
@@ -212,7 +194,6 @@ class IdeasDialog(QDialog):
         self.url.setEnabled(not busy)
         self.create_btn.setEnabled(not busy and bool(self._checked()))
         if busy:
-            self.whisper_box.setVisible(False)
             self._elapsed = 0
             self._message = message
             self.status.setText(f"{message} · 0s")
@@ -234,12 +215,22 @@ class IdeasDialog(QDialog):
 
     # ---- pipeline ----------------------------------------------------------
 
+    def _resize_to(self, size: tuple):
+        """Grow in place rather than jumping to a corner of the screen."""
+        centre = self.frameGeometry().center()
+        self.resize(*size)
+        frame = self.frameGeometry()
+        frame.moveCenter(centre)
+        self.move(frame.topLeft())
+
     def analyse(self):
         url = self.url.text().strip()
         if not url:
             self.url.setFocus()
             return
+        self._cost = 0.0
         self._clear_cards()
+        self._resize_to(SMALL)
         self._set_busy(True, "Reading the video")
         run_async(self, ideas.prepare, self._on_prepared, self._fail,
                   url, self.settings.get("cookies_path", ""),
@@ -258,30 +249,19 @@ class IdeasDialog(QDialog):
             self._render_topics(entry["topics"])
             return
 
-        if not self._cues:
-            self._set_busy(False)
-            self.status.setText("")
-            self.whisper_label.setText(
-                "This video has no subtitles. Transcribe it with Whisper? "
-                "The first run downloads a model, and a long video takes minutes.")
-            self.whisper_box.setVisible(True)
+        if self._cues:
+            self._find_topics()
             return
 
-        self._find_topics()
-
-    def run_whisper(self):
-        self.settings["whisper_model"] = self.whisper_model.currentText()
-        from app.config import save_settings
-        save_settings(self.settings)
-        self._set_busy(True, "Transcribing")
+        self._set_busy(True, "Fetching audio")
         run_async(self, ideas.transcribe_video, self._on_transcribed, self._fail,
-                  self._info, self.whisper_model.currentText(),
-                  self.settings.get("cookies_path", ""),
+                  self._info, self.settings, self.settings.get("cookies_path", ""),
                   on_progress=self._on_progress)
 
-    def _on_transcribed(self, cues: list):
-        self._cues = cues
-        self._source = "whisper"
+    def _on_transcribed(self, result: dict):
+        self._cues = result["cues"]
+        self._source = result["source"]
+        self._cost = result.get("cost", 0.0)
         self._find_topics()
 
     def _find_topics(self):
@@ -292,7 +272,10 @@ class IdeasDialog(QDialog):
 
     def _on_topics(self, entry: dict):
         self._set_busy(False)
-        self.status.setText("")
+        note = f"{len(entry.get('topics', []))} topics · {self._source}"
+        if self._cost:
+            note += f" · ${self._cost:.3f}"
+        self.status.setText(note)
         self._show_video_head(entry.get("video_summary", ""))
         self._render_topics(entry.get("topics", []))
 
@@ -324,6 +307,8 @@ class IdeasDialog(QDialog):
             self._cards.append(card)
         self.scroll.setVisible(bool(topics))
         self.footer.setVisible(bool(topics))
+        if topics:
+            self._resize_to(LARGE)
         self._refresh_create()
 
     def _checked(self) -> list:

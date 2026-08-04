@@ -10,12 +10,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.paths import CACHE_DIR, DATA_DIR
+from app.services.ideas import stt as stt_module
 from app.services.ideas import topics as topics_module
-from app.services.ideas import transcribe as transcribe_module
 from app.services.ideas import youtube
 
 INDEX_PATH = DATA_DIR / "ideas.json"
 TRANSCRIPT_DIR = CACHE_DIR / "transcripts"
+AUDIO_DIR = CACHE_DIR / "audio"
 
 
 def _now() -> str:
@@ -77,10 +78,10 @@ def cached_cues(video_id: str) -> list:
 # ---- pipeline --------------------------------------------------------------
 
 def prepare(url: str, cookies: str = "", progress=None) -> dict:
-    """Metadata plus a transcript if one can be had without transcribing.
+    """Metadata, plus whatever we already have cached for this video.
 
-    Returns {'info', 'cues', 'source', 'entry'}. Empty `cues` means the video
-    has no subtitles and the caller has to decide about Whisper.
+    Returns {'info', 'cues', 'source', 'entry'}. Empty `cues` simply means the
+    video has not been transcribed yet.
     """
     if progress:
         progress("Reading the video page")
@@ -88,35 +89,52 @@ def prepare(url: str, cookies: str = "", progress=None) -> dict:
 
     entry = get_entry(info["video_id"])
     cues = cached_cues(info["video_id"])
-    if cues:
+    if cues and progress:
+        progress("Using the cached transcript")
+    return {"info": info, "cues": cues,
+            "source": entry.get("source", "cache" if cues else ""), "entry": entry}
+
+
+def transcribe_video(info: dict, settings: dict, cookies: str = "",
+                     progress=None) -> dict:
+    """Speech-to-text first; a video's own hand-made subtitles are the fallback.
+
+    -> {'cues', 'source', 'cost'}
+    """
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    audio = compact = ""
+    try:
         if progress:
-            progress("Using the cached transcript")
-        return {"info": info, "cues": cues,
-                "source": entry.get("source", "cache"), "entry": entry}
+            progress("Downloading audio")
+        audio = youtube.download_audio(info["url"], str(AUDIO_DIR), cookies, progress)
 
-    if progress:
-        progress("Looking for subtitles")
-    track = youtube.pick_track(info)
-    if not track:
-        return {"info": info, "cues": [], "source": "", "entry": entry}
+        if progress:
+            progress("Re-encoding audio")
+        compact = str(AUDIO_DIR / f"{info['video_id']}.mp3")
+        stt_module.compress(audio, compact, settings.get("ffmpeg_path", ""))
 
-    if progress:
-        progress(f"Downloading {track['kind']} ({track['language']})")
-    cues = youtube.fetch_cues(track)
-    if cues:
+        result = stt_module.transcribe(
+            compact, settings.get("stt_model", stt_module.DEFAULT_MODEL), progress)
+        cache_cues(info["video_id"], result["cues"])
+        return {"cues": result["cues"], "source": "speech-to-text",
+                "cost": result["cost"]}
+
+    except Exception as stt_error:
+        track = youtube.pick_manual_track(info)
+        if not track:
+            raise
+        if progress:
+            progress("Speech-to-text failed — using the video's own subtitles")
+        cues = youtube.fetch_cues(track)
+        if not cues:
+            raise stt_error
         cache_cues(info["video_id"], cues)
-    return {"info": info, "cues": cues, "source": track["kind"], "entry": entry}
+        return {"cues": cues, "source": "subtitles", "cost": 0.0}
 
-
-def transcribe_video(info: dict, model_size: str = "small", cookies: str = "",
-                     progress=None) -> list:
-    audio = youtube.download_audio(info["url"], str(transcribe_module.audio_cache_dir()),
-                                   cookies, progress)
-    cues = transcribe_module.transcribe(
-        audio, model_size, info.get("language", ""), info.get("duration", 0), progress)
-    cache_cues(info["video_id"], cues)
-    Path(audio).unlink(missing_ok=True)   # the transcript is what we wanted
-    return cues
+    finally:
+        for leftover in (audio, compact):
+            if leftover:
+                Path(leftover).unlink(missing_ok=True)   # the transcript is what we wanted
 
 
 def find_topics(info: dict, cues: list, settings: dict, source: str = "",
@@ -138,9 +156,10 @@ def find_topics(info: dict, cues: list, settings: dict, source: str = "",
 
 
 def analyse(url: str, settings: dict, cookies: str = "", progress=None) -> dict:
-    """Whole pipeline in one call, for the subtitle path. Raises if none exist."""
+    """The whole pipeline in one call."""
     prepared = prepare(url, cookies, progress)
-    if not prepared["cues"]:
-        raise RuntimeError("This video has no subtitles.")
-    return find_topics(prepared["info"], prepared["cues"], settings,
-                       prepared["source"], progress)
+    cues, source = prepared["cues"], prepared["source"]
+    if not cues:
+        result = transcribe_video(prepared["info"], settings, cookies, progress)
+        cues, source = result["cues"], result["source"]
+    return find_topics(prepared["info"], cues, settings, source, progress)

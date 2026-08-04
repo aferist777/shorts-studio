@@ -50,7 +50,7 @@ DEFAULTS = {
     "sub_margin_v": 320,
     "bgm_path": "",
     "bgm_volume": 12,
-    "whisper_model": "small",
+    "stt_model": "x-ai/grok-stt-1.0",
     "cookies_path": "",
     "ffmpeg_path": "",
 }
