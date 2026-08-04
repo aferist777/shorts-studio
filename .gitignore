@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+venv/
+.venv/
+data/projects/
+data/cache/
+data/*.log
+data/*.png
+data/projects.json
+data/settings.json
+data/ideas.json
+.env
