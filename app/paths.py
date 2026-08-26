@@ -12,8 +12,15 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 PROJECTS_DIR = DATA_DIR / "projects"
 CACHE_DIR = DATA_DIR / "cache"
+# Transcripts used to live under cache/, back when a lost one cost eight cents
+# to redo. YouTube now refuses a good share of videos outright, so a transcript
+# can be the only surviving copy of a video we can never fetch again — it does
+# not belong in a folder whose whole promise is that deleting it is harmless.
+TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
+# working copies of downloaded videos, kept only until their fragments are cut
+MEDIA_DIR = DATA_DIR / "media"
 
-for _d in (DATA_DIR, PROJECTS_DIR, CACHE_DIR):
+for _d in (DATA_DIR, PROJECTS_DIR, CACHE_DIR, TRANSCRIPTS_DIR, MEDIA_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 
@@ -47,16 +54,7 @@ def find_ffmpeg(override: str = "") -> str:
     return ""
 
 
-def find_ffprobe(override: str = "") -> str:
-    """ffprobe usually sits next to ffmpeg — but ffmpeg-static ships only ffmpeg."""
-    if override and Path(override).is_file():
-        return override
-    on_path = shutil.which("ffprobe")
-    if on_path:
-        return on_path
-    ff = find_ffmpeg()
-    if ff:
-        sibling = Path(ff).with_name("ffprobe.exe")
-        if sibling.is_file():
-            return str(sibling)
-    return ""
+# There was a find_ffprobe here too. ffmpeg-static ships no ffprobe, so it
+# almost always came back empty and every caller had to have an ffmpeg path to
+# fall back on anyway — in the end they all just used ffmpeg, and nobody called
+# it at all.

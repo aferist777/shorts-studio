@@ -17,7 +17,13 @@ TIMEOUT = 180.0
 # without a ceiling a weaker model can loop and return tens of KB of garbage;
 # reasoning models spend part of this budget before writing anything, so the
 # guard sits well above what the visible answer needs
-MAX_TOKENS = 8000
+# Measured on the poster call: about 370 tokens of answer against 3100-3400 of
+# thinking, and the thinking varies enough between runs that the same request
+# succeeds twice and is cut off mid-JSON on the third. It cannot be turned off —
+# gemini-3.6-flash answers "reasoning is mandatory for this endpoint" to any
+# request that tries — so the ceiling has to clear the spikes instead. Nothing
+# is paid for room left unused.
+MAX_TOKENS = 16000
 
 
 def complete_json(provider: str, model: str, system: str, user: str, schema: dict,

@@ -5,12 +5,54 @@ until a later phase actually needs a fragment.
 """
 
 import re
+import time
+from pathlib import Path
 
 import httpx
 
 TIMEOUT = 120.0
+
+# Retrying helps far less than the first measurement suggested: one link went
+# through once in thirteen attempts, while another was served every single
+# time. So the refusal is mostly decided per video, and a retry only catches
+# the rare flake. Kept short on purpose — a long retry loop would just make the
+# dead end slower without making it any less dead. The file route is the answer.
+BOT_CHECK_TRIES = 3
+BOT_CHECK_PAUSE = 2.0
+_BOT_CHECK_RE = re.compile(r"sign in to confirm you.{0,3}re not a bot", re.I)
+# the interface looks for this to offer the file route instead of the raw error
+BOT_CHECK_MARK = "would not serve this video"
+
 # [музыка], [applause] and friends are recognition markers, not speech
 _MARKER_RE = re.compile(r"\[[^\]]{1,40}\]")
+
+
+class BotCheck(RuntimeError):
+    """YouTube asked for a login instead of serving the video.
+
+    Its own message is a wall of text about cookie flags and links to a wiki,
+    which is useless to someone standing in front of a dialog — hence a
+    separate type carrying a sentence that says what to do next.
+    """
+
+
+def _with_retries(call, progress=None):
+    """Run a yt-dlp call, retrying while YouTube throws its random refusal."""
+    for attempt in range(1, BOT_CHECK_TRIES + 1):
+        try:
+            return call()
+        except Exception as e:
+            if not _BOT_CHECK_RE.search(str(e)):
+                raise
+            if attempt == BOT_CHECK_TRIES:
+                raise BotCheck(
+                    f"YouTube {BOT_CHECK_MARK} to the app — it asked for a "
+                    f"login on all {BOT_CHECK_TRIES} attempts. Download the "
+                    "video yourself and add it with “From a file…” instead."
+                ) from e
+            if progress:
+                progress(f"YouTube refused — retrying {attempt}/{BOT_CHECK_TRIES - 1}")
+            time.sleep(BOT_CHECK_PAUSE)
 _VTT_TIME_RE = re.compile(
     r"(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[.,](\d{3})")
 
@@ -20,18 +62,32 @@ def _options(cookies: str = "") -> dict:
     opts = {"skip_download": True, "quiet": True, "no_warnings": True, "noprogress": True}
     if cookies:
         opts["cookiefile"] = cookies
+
+    # Best video and best audio arrive as separate streams and yt-dlp joins them
+    # with ffmpeg — which it looks for on PATH, where this machine has none. It
+    # has to be told where ours lives or the download dies at the join with
+    # "you have requested merging of multiple formats but ffmpeg is not installed".
+    from app.paths import find_ffmpeg
+    ffmpeg = find_ffmpeg()
+    if ffmpeg:
+        opts["ffmpeg_location"] = str(Path(ffmpeg).parent)
     return opts
 
 
-def fetch_info(url: str, cookies: str = "") -> dict:
+def fetch_info(url: str, cookies: str = "", progress=None) -> dict:
     try:
         import yt_dlp
     except ImportError as e:
         raise RuntimeError("The `yt-dlp` package is missing — run: pip install yt-dlp") from e
 
-    try:
+    def call():
         with yt_dlp.YoutubeDL(_options(cookies)) as ydl:
-            raw = ydl.extract_info(url, download=False)
+            return ydl.extract_info(url, download=False)
+
+    try:
+        raw = _with_retries(call, progress)
+    except BotCheck:
+        raise
     except Exception as e:
         raise RuntimeError(f"Could not read that link: {str(e)[:200]}") from e
 
@@ -147,6 +203,10 @@ def download_audio(url: str, out_dir: str, cookies: str = "", progress=None) -> 
 
     opts = {**_options(cookies), "skip_download": False, "format": "bestaudio/best",
             "outtmpl": template, "progress_hooks": [hook]}
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        raw = ydl.extract_info(url, download=True)
-    return ydl.prepare_filename(raw)
+
+    def call():
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            raw = ydl.extract_info(url, download=True)
+            return ydl.prepare_filename(raw)
+
+    return _with_retries(call, progress)

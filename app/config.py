@@ -23,9 +23,8 @@ PROVIDERS = [
     ("anthropic", "Anthropic — Claude (script writing)"),
     ("openrouter", "OpenRouter — any model, one key"),
     ("openai", "OpenAI"),
-    ("pexels", "Pexels — stock footage"),
-    ("pixabay", "Pixabay — stock footage"),
     ("elevenlabs", "ElevenLabs — premium voices"),
+    ("kie", "kie.ai — drawing the frames"),
 ]
 
 SETTINGS_PATH = DATA_DIR / "settings.json"
@@ -40,19 +39,29 @@ DEFAULTS = {
     "tts_engine": "edge",
     "tts_voice": "ru-RU-DmitryNeural",
     "tts_rate": "+0%",
-    "footage_sources": ["pexels", "pixabay"],
-    "local_folder": "",
     "sub_font": "Arial",
     "sub_size": 78,
     "sub_highlight": "#8B7CF6",
     "sub_words_per_line": 4,
     "sub_uppercase": True,
     "sub_margin_v": 320,
+    "still_motion": "zoom_in",
+    "transition": "none",
+    "transition_len": 0.25,
     "bgm_path": "",
     "bgm_volume": 12,
+    # drawing the frames. 4K rather than 1K because the renderer blows every
+    # still up to 2160x3840 before it moves the camera inside it: at 1K that is
+    # a 2.8x enlargement and the ink line does not survive it.
+    "draw_model": "nano-banana-2",
+    "draw_aspect": "9:16",
+    "draw_resolution": "4K",
+    "draw_style": "mad",
     "stt_model": "x-ai/grok-stt-1.0",
     "cookies_path": "",
     "ffmpeg_path": "",
+    # widths of the three panes, remembered between runs
+    "sash_sizes": [],
 }
 
 

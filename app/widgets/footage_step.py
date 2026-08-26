@@ -1,96 +1,169 @@
-"""Footage step — one clip per scene, chosen from stock or your own folder.
+"""Footage step — the pictures each scene shows, in playing order.
 
-Thumbnails only: the full clip is never played here, it just gets attached to
-the scene and shown as a poster frame.
+Nothing here is searched for any more. A scene is filled either with drawings
+made for it (Gen frames) or with pieces cut out of the project's own source
+video (Cut), and both land on the project's shelf first — the + on a row is
+what puts them into a scene.
 """
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QGuiApplication, QPixmap
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
-    QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QProgressBar,
-    QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QFrame, QGraphicsBlurEffect, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+    QVBoxLayout, QWidget,
 )
 
-from app.paths import project_dir
-from app.services import footage
-from app.services.footage import local
+from app.models_data import Visual
+from app.services import thumbs
 from app.services.worker import run_async
-from app.widgets.clip_picker import ClipPicker
+from app.widgets.cut_dialog import CutDialog
+from app.widgets.frames_dialog import FramesDialog
+from app.widgets.pool_picker import PoolPicker
 
-THUMB_W, THUMB_H = 45, 80
-
-
-def _autofill(scenes: list, sources: list, out_dir: str, local_folder: str,
-              progress=None) -> list:
-    """One clip per scene, top-ranked match, downloaded. Returns per-scene dicts."""
-    pool = []
-    if local_folder:
-        if progress:
-            progress("Scanning local folder")
-        pool = local.scan(local_folder, progress=progress)
-
-    used, out = set(), []
-    for i, scene in enumerate(scenes):
-        if progress:
-            progress(f"Scene {i + 1} of {len(scenes)}")
-        candidates = footage.rank(pool, scene["duration"]) if pool else footage.search(
-            scene["terms"], sources, min_duration=scene["duration"]
-        )
-        # don't repeat a clip inside one video
-        fresh = [c for c in candidates if (c["source"], c["id"]) not in used]
-        if not fresh:
-            out.append(None)
-            continue
-        chosen = fresh[0]
-        used.add((chosen["source"], chosen["id"]))
-        dest = str(Path(out_dir) / f"clip_{i + 1:02d}.mp4")
-        footage.download(chosen, dest, progress=progress)
-        out.append({
-            "index": i,
-            "path": dest,
-            "source": chosen["source"],
-            "thumb": footage.thumbnail(chosen),
-            "credit": chosen["credit"],
-        })
-    return out
+# the posters inside a scene row are small: with up to five of them per row and
+# nineteen rows, full-size ones turn the list into a staircase
+SHOT_W, SHOT_H = 32, 57
+# what hovering one shows instead — big enough to judge a picture by
+BIG_W, BIG_H = 248, 440
+BLUR = 4
 
 
-def _search_for_scene(terms: list, sources: list, min_duration: float,
-                      local_folder: str, progress=None) -> list:
-    if local_folder:
-        return footage.rank(local.scan(local_folder, progress=progress), min_duration)
-    return footage.search(terms, sources, min_duration=min_duration, progress=progress)
+class Magnifier(QLabel):
+    """One floating preview shared by every poster on the step.
+
+    A window per poster would be ninety-six of them for a project this size,
+    each holding a pixmap, to show one at a time.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint)
+        self.setObjectName("Magnifier")
+        self.setAlignment(Qt.AlignCenter)
+        self.setFixedSize(BIG_W, BIG_H)
+
+    def show_for(self, path: str, anchor: QWidget):
+        pixmap = QPixmap(thumbs.small(path)) if path else QPixmap()
+        if pixmap.isNull():
+            return
+        self.setPixmap(pixmap.scaled(BIG_W, BIG_H, Qt.KeepAspectRatio,
+                                     Qt.SmoothTransformation))
+        # to the right of the poster, nudged back inside the screen if it would
+        # otherwise hang off the edge
+        spot = anchor.mapToGlobal(anchor.rect().topRight())
+        x, y = spot.x() + 10, spot.y() - (BIG_H - anchor.height()) // 2
+        screen = QGuiApplication.screenAt(spot) or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry()
+        if x + BIG_W > area.right():
+            x = anchor.mapToGlobal(anchor.rect().topLeft()).x() - BIG_W - 10
+        y = max(area.top() + 8, min(y, area.bottom() - BIG_H - 8))
+        self.move(x, y)
+        self.show()
 
 
-def _download_one(candidate: dict, dest: str, progress=None) -> dict:
-    path = footage.download(candidate, dest, progress=progress)
-    return {
-        "path": path,
-        "source": candidate["source"],
-        "thumb": footage.thumbnail(candidate),
-        "credit": candidate["credit"],
-    }
+class ShotThumb(QLabel):
+    """One poster in a scene row: hover to see it, × to take it out.
+
+    Clicking the picture itself used to delete it, which is a lot to lose to a
+    misplaced click — and it was gone for good. Now it steps aside instead: it
+    stays in the row, blurred, at the end, and clicking it puts it back where
+    it was.
+    """
+
+    dropRequested = Signal(int)
+    restoreRequested = Signal(int)
+
+    def __init__(self, at: int, visual, magnifier: Magnifier):
+        super().__init__()
+        self.setObjectName("ClipThumb")
+        self.at = at
+        self.visual = visual
+        self._magnifier = magnifier
+        self.setFixedSize(SHOT_W, SHOT_H)
+        self.setAlignment(Qt.AlignCenter)
+        self.setCursor(Qt.PointingHandCursor)
+
+        source = visual.thumb or visual.path
+        pixmap = QPixmap(thumbs.small(source)) if source else QPixmap()
+        if not pixmap.isNull():
+            self.setPixmap(pixmap.scaled(SHOT_W, SHOT_H,
+                                         Qt.KeepAspectRatioByExpanding,
+                                         Qt.SmoothTransformation))
+        else:
+            self.setText(f"{visual.duration:.0f}s")
+
+        self.drop = QPushButton("×", self)
+        self.drop.setObjectName("ShotDrop")
+        self.drop.setCursor(Qt.PointingHandCursor)
+        self.drop.setFixedSize(14, 14)
+        self.drop.move(SHOT_W - 15, 1)
+        self.drop.setToolTip("Take this one out of the scene")
+        self.drop.clicked.connect(lambda: self.dropRequested.emit(self.at))
+        self.drop.setVisible(False)
+
+        if visual.off:
+            blur = QGraphicsBlurEffect(self)
+            blur.setBlurRadius(BLUR)
+            self.setGraphicsEffect(blur)
+            self.drop.setParent(None)     # nothing to take out twice
+            self.setToolTip("Out of the scene — click to put it back")
+        else:
+            self.setToolTip(f"{visual.duration:.1f}s · "
+                            f"{visual.source or visual.kind}")
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        if not self.visual.off:
+            self.drop.setVisible(True)
+        self._magnifier.show_for(self.visual.thumb or self.visual.path, self)
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        if not self.visual.off:
+            self.drop.setVisible(False)
+        self._magnifier.hide()
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if self.visual.off:
+            self._magnifier.hide()
+            self.restoreRequested.emit(self.at)
 
 
 class SceneClipRow(QFrame):
-    pickRequested = Signal(int)
+    playRequested = Signal(int)
+    addRequested = Signal(int)
+    changed = Signal(int)
 
-    def __init__(self, index: int, scene):
+    def __init__(self, index: int, scene, magnifier):
         super().__init__()
         self.setObjectName("SceneCard")
         self.index = index
         self.scene = scene
+        self._magnifier = magnifier
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(10, 8, 10, 8)
         lay.setSpacing(10)
 
-        self.thumb = QLabel()
-        self.thumb.setObjectName("ClipThumb")
-        self.thumb.setFixedSize(THUMB_W, THUMB_H)
-        self.thumb.setAlignment(Qt.AlignCenter)
+        # One small poster per shot, in playing order — built only once asked
+        # for. A drawn picture is a 3 MB png, and nineteen rows of them cost
+        # four seconds of frozen window to show a strip 57 pixels tall.
+        self.shots_row = QWidget()
+        self.shots = QHBoxLayout(self.shots_row)
+        self.shots.setContentsMargins(0, 0, 0, 0)
+        self.shots.setSpacing(3)
+        self.shots.addStretch(1)
+        self.shots_row.setVisible(False)
+        self._shot_labels = []
+        self._open = False
+
+        self.toggle = QPushButton()
+        self.toggle.setObjectName("Disclose")
+        self.toggle.setCursor(Qt.PointingHandCursor)
+        self.toggle.clicked.connect(self.toggle_shots)
 
         middle = QVBoxLayout()
         middle.setSpacing(4)
@@ -105,52 +178,121 @@ class SceneClipRow(QFrame):
         top.addStretch(1)
         middle.addLayout(top)
 
-        self.chips = QHBoxLayout()
-        self.chips.setSpacing(5)
-        self.chips.addStretch(1)
-        middle.addLayout(self.chips)
+        # the line this scene speaks — read-only, but you cannot judge whether a
+        # picture fits without seeing what is said over it
+        self.line = QLabel()
+        self.line.setObjectName("SceneLine")
+        self.line.setWordWrap(True)
+        self.line.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        middle.addWidget(self.line)
+        toggle_row = QHBoxLayout()
+        toggle_row.setContentsMargins(0, 0, 0, 0)
+        toggle_row.addWidget(self.toggle)
+        toggle_row.addStretch(1)
+        middle.addLayout(toggle_row)
+        middle.addWidget(self.shots_row)
 
         self.length = QLabel()
         self.length.setObjectName("Chip")
         self.length.setFixedWidth(52)
         self.length.setAlignment(Qt.AlignCenter)
 
-        self.pick = QPushButton("Pick…")
-        self.pick.setCursor(Qt.PointingHandCursor)
-        self.pick.clicked.connect(lambda: self.pickRequested.emit(self.index))
+        # hearing the line is how you judge whether a picture belongs under it
+        self.play = QPushButton("▶")
+        self.play.setObjectName("GBtn")
+        self.play.setCursor(Qt.PointingHandCursor)
+        self.play.setToolTip("Play this scene's voice track")
+        self.play.clicked.connect(lambda: self.playRequested.emit(self.index))
 
-        lay.addWidget(self.thumb)
+        self.add = QPushButton("+")
+        self.add.setObjectName("GBtn")
+        self.add.setCursor(Qt.PointingHandCursor)
+        self.add.setToolTip("Take footage this project has already gathered")
+        self.add.clicked.connect(lambda: self.addRequested.emit(self.index))
+
         lay.addLayout(middle, 1)
         lay.addWidget(self.length, 0, Qt.AlignVCenter)   # chips must not stretch to row height
-        lay.addWidget(self.pick, 0, Qt.AlignVCenter)
+        lay.addWidget(self.play, 0, Qt.AlignVCenter)
+        lay.addWidget(self.add, 0, Qt.AlignVCenter)
 
         self.refresh()
 
-    def refresh(self):
-        has_clip = bool(self.scene.clip_path) and Path(self.scene.clip_path).exists()
-        pixmap = QPixmap(self.scene.clip_thumb) if self.scene.clip_thumb else QPixmap()
-        if has_clip and not pixmap.isNull():
-            self.thumb.setPixmap(pixmap.scaled(THUMB_W, THUMB_H, Qt.KeepAspectRatioByExpanding,
-                                               Qt.SmoothTransformation))
+    def drop_shot(self, at: int):
+        """Out of the scene, not out of the project."""
+        self._set_off(at, True)
+
+    def restore_shot(self, at: int):
+        self._set_off(at, False)
+
+    def _set_off(self, at: int, off: bool):
+        if 0 <= at < len(self.scene.visuals):
+            self.scene.visuals[at].off = off
+            self.scene.rebalance()
+            self.refresh()
+            self.changed.emit(self.index)
+
+    def toggle_shots(self):
+        self._open = not self._open
+        self.shots_row.setVisible(self._open)
+        if self._open:
+            self._build_shots()
         else:
-            self.thumb.setPixmap(QPixmap())
-            self.thumb.setText("—")
-        self.credit.setText(
-            f"{self.scene.clip_source} · {self.scene.clip_credit}" if has_clip else "no clip yet"
-        )
+            self._clear_shots()      # and with them the pixels they were holding
+        self._sync_toggle()
+
+    def _clear_shots(self):
+        for label in self._shot_labels:
+            label.setParent(None)
+            label.deleteLater()
+        self._shot_labels.clear()
+
+    def _sync_toggle(self):
+        total = len(self.scene.visuals)
+        playing = len(self.scene.shots)
+        self.toggle.setVisible(bool(total))
+        if not total:
+            return
+        aside = f"  (+{total - playing} out)" if total > playing else ""
+        self.toggle.setText(("▾  Hide frames · " if self._open else "▸  Show frames · ")
+                            + str(playing) + aside)
+
+    def refresh(self):
+        self.scene.rebalance()
+        self._clear_shots()
+        if self._open:
+            self._build_shots()
+        self._sync_toggle()
+
+        playing = self.scene.shots
+        if playing:
+            each = playing[0].duration
+            self.credit.setText(f"{len(playing)} shot{'s' if len(playing) > 1 else ''} · "
+                                f"{each:.1f}s each")
+        elif self.scene.visuals:
+            self.credit.setText("every frame taken out")
+        else:
+            self.credit.setText("no footage yet")
+            self.shots_row.setVisible(False)
         self.length.setText(f"{self.scene.duration:.1f}s" if self.scene.duration else "—")
+        self.line.setText(self.scene.text or "—")
 
-        while self.chips.count() > 1:
-            item = self.chips.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        for term in self.scene.terms[:3]:
-            chip = QLabel(term)
-            chip.setObjectName("Chip")
-            self.chips.insertWidget(self.chips.count() - 1, chip)
+    def _build_shots(self):
+        """Playing ones in their order, then the ones taken out.
 
-    def set_locked(self, locked: bool):
-        self.pick.setEnabled(not locked)
+        The list itself is never reordered — only shown that way — which is why
+        putting one back needs no record of where it came from.
+        """
+        order = ([(i, v) for i, v in enumerate(self.scene.visuals) if not v.off]
+                 + [(i, v) for i, v in enumerate(self.scene.visuals) if v.off])
+        for slot, (at, visual) in enumerate(order):
+            thumb = ShotThumb(at, visual, self._magnifier)
+            thumb.dropRequested.connect(self.drop_shot)
+            thumb.restoreRequested.connect(self.restore_shot)
+            self.shots.insertWidget(slot, thumb)
+            self._shot_labels.append(thumb)
+
+    def set_playing(self, on: bool):
+        self.play.setText("■" if on else "▶")
 
 
 class FootageStep(QWidget):
@@ -162,9 +304,11 @@ class FootageStep(QWidget):
         self.settings = settings
         self.project = None
         self._rows = []
-        self._elapsed = 0
-        self._message = ""
-        self._pick_index = -1
+        self._player = None
+        self._playing = -1      # which row is sounding, or -1
+        self._magnifier = Magnifier(self)
+        self._warming = set()   # projects whose thumbnails are being built
+        self._warm_id = ""
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 12, 14, 12)
@@ -172,50 +316,22 @@ class FootageStep(QWidget):
 
         controls = QHBoxLayout()
         controls.setSpacing(10)
-        cap = QLabel("SOURCES")
-        cap.setObjectName("FieldLabel")
-        controls.addWidget(cap)
 
-        self.source_boxes = {}
-        for sid, label in footage.SOURCES.items():
-            box = QCheckBox(label)
-            box.setChecked(sid in settings.get("footage_sources", []))
-            box.stateChanged.connect(self._persist)
-            controls.addWidget(box)
-            self.source_boxes[sid] = box
-
-        self.use_local = QCheckBox("Local folder")
-        self.use_local.setChecked(bool(settings.get("local_folder")))
-        self.use_local.stateChanged.connect(self._on_local_toggled)
-        controls.addWidget(self.use_local)
-
-        self.folder_btn = QPushButton("Browse…")
-        self.folder_btn.setCursor(Qt.PointingHandCursor)
-        self.folder_btn.clicked.connect(self._browse_folder)
-        controls.addWidget(self.folder_btn)
+        self.cut_btn = QPushButton("Cut…")
+        self.cut_btn.setCursor(Qt.PointingHandCursor)
+        self.cut_btn.setToolTip(
+            "Break this project's fragment into pieces you can use as footage")
+        self.cut_btn.clicked.connect(self.open_cutter)
+        controls.addWidget(self.cut_btn)
 
         controls.addStretch(1)
-        self.autofill_btn = QPushButton("Fill all scenes")
-        self.autofill_btn.setObjectName("Primary")
-        self.autofill_btn.setCursor(Qt.PointingHandCursor)
-        self.autofill_btn.clicked.connect(self.autofill)
-        controls.addWidget(self.autofill_btn)
+        self.gen_btn = QPushButton("Gen frames…")
+        self.gen_btn.setObjectName("Primary")
+        self.gen_btn.setCursor(Qt.PointingHandCursor)
+        self.gen_btn.setToolTip("Draw the pictures for this video")
+        self.gen_btn.clicked.connect(self.open_frames)
+        controls.addWidget(self.gen_btn)
         root.addLayout(controls)
-
-        self.folder_label = QLabel()
-        self.folder_label.setObjectName("Hint")
-        root.addWidget(self.folder_label)
-
-        status_row = QHBoxLayout()
-        status_row.setSpacing(8)
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 0)
-        self.progress.setVisible(False)
-        self.status = QLabel("")
-        self.status.setObjectName("Hint")
-        status_row.addWidget(self.progress, 1)
-        status_row.addWidget(self.status)
-        root.addLayout(status_row)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -228,7 +344,7 @@ class FootageStep(QWidget):
         self.scroll.setWidget(holder)
         root.addWidget(self.scroll, 1)
 
-        self.placeholder = QLabel("Write a script first — footage is picked per scene.")
+        self.placeholder = QLabel("Write a script first — footage is chosen per scene.")
         self.placeholder.setObjectName("Hint")
         self.placeholder.setAlignment(Qt.AlignCenter)
         self.row_layout.insertWidget(0, self.placeholder)
@@ -238,50 +354,55 @@ class FootageStep(QWidget):
         self.total.setAlignment(Qt.AlignRight)
         root.addWidget(self.total)
 
-        self._timer = QTimer(self)
-        self._timer.setInterval(1000)
-        self._timer.timeout.connect(self._tick)
-        self._on_local_toggled()
-
-    # ---- settings ----------------------------------------------------------
-
-    def _persist(self):
-        self.settings["footage_sources"] = [
-            sid for sid, box in self.source_boxes.items() if box.isChecked()
-        ]
-        if not self.use_local.isChecked():
-            self.settings["local_folder"] = ""
-        from app.config import save_settings
-        save_settings(self.settings)
-
-    def _on_local_toggled(self):
-        on = self.use_local.isChecked()
-        self.folder_btn.setEnabled(on)
-        for box in self.source_boxes.values():
-            box.setEnabled(not on)  # a local folder replaces the stock search
-        folder = self.settings.get("local_folder", "")
-        self.folder_label.setText(f"Using {folder}" if on and folder else "")
-        self.folder_label.setVisible(bool(on and folder))
-        self._persist()
-
-    def _browse_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Folder with your clips",
-                                                  self.settings.get("local_folder", ""))
-        if folder:
-            self.settings["local_folder"] = folder
-            self.use_local.setChecked(True)
-            self._on_local_toggled()
-
-    def _local_folder(self) -> str:
-        return self.settings.get("local_folder", "") if self.use_local.isChecked() else ""
-
-    def _sources(self) -> list:
-        return [sid for sid, box in self.source_boxes.items() if box.isChecked()]
-
     # ---- project binding ---------------------------------------------------
 
     def set_project(self, project):
         self.project = project
+        self._rebuild_rows()
+        self._warm_thumbs()
+
+    # ---- thumbnails --------------------------------------------------------
+
+    def _warm_thumbs(self):
+        """Build the small copies for this project, off the window's thread.
+
+        Opening a scene is instant once they exist, and they only have to be
+        made once per picture, ever — so the whole project is done at once
+        rather than a scene's worth at a time.
+        """
+        if not self.project:
+            return
+        wanted = [v.thumb or v.path for s in self.project.scenes for v in s.visuals]
+        todo = thumbs.missing(wanted)
+        if not todo or self.project.id in self._warming:
+            return
+        self._warming.add(self.project.id)
+        self._warm_id = self.project.id
+        self.log.emit(f"Preparing {len(todo)} thumbnails in the background…")
+        run_async(self, thumbs.build, self._on_warm, self._on_warm_failed, todo)
+
+    def _on_warm(self, made: int):
+        self._warming.discard(self._warm_id)
+        self.log.emit(f"{made} thumbnails ready")
+        # only rows already open have anything on screen to replace
+        for row in self._rows:
+            if row._open:
+                row.refresh()
+
+    def _on_warm_failed(self, message: str):
+        self._warming.discard(self._warm_id)
+        self.log.emit(f"Thumbnails: {message}")
+
+    def sync(self):
+        """Catch up with a scene list that changed while this step was off screen."""
+        scenes = self.project.scenes if self.project else []
+        same = (len(self._rows) == len(scenes)
+                and all(row.scene is scene for row, scene in zip(self._rows, scenes)))
+        if same:
+            for row in self._rows:
+                row.refresh()
+            self._update_total()
+            return
         self._rebuild_rows()
 
     def _rebuild_rows(self):
@@ -293,132 +414,114 @@ class FootageStep(QWidget):
         scenes = self.project.scenes if self.project else []
         self.placeholder.setVisible(not scenes)
         for i, scene in enumerate(scenes):
-            row = SceneClipRow(i, scene)
-            row.pickRequested.connect(self.pick_for_scene)
+            row = SceneClipRow(i, scene, self._magnifier)
+            row.playRequested.connect(self.toggle_play)
+            row.addRequested.connect(self.add_from_pool)
+            row.changed.connect(self._on_row_changed)
             self.row_layout.insertWidget(i + 1, row)
             self._rows.append(row)
         self._update_total()
 
     def _update_total(self):
         scenes = self.project.scenes if self.project else []
-        filled = [s for s in scenes if s.clip_path and Path(s.clip_path).exists()]
-        self.total.setText(f"{len(filled)}/{len(scenes)} scenes have footage" if scenes else "")
+        filled = [s for s in scenes if s.shots]
+        shots = sum(len(s.shots) for s in scenes)
+        self.total.setText(f"{len(filled)}/{len(scenes)} scenes filled · {shots} shots"
+                           if scenes else "")
 
-    # ---- lock / progress ---------------------------------------------------
-
-    def _set_busy(self, busy: bool, message: str = ""):
-        self.progress.setVisible(busy)
-        self.autofill_btn.setEnabled(not busy)
-        self.use_local.setEnabled(not busy)
-        self.folder_btn.setEnabled(not busy and self.use_local.isChecked())
-        for box in self.source_boxes.values():
-            box.setEnabled(not busy and not self.use_local.isChecked())
-        for row in self._rows:
-            row.set_locked(busy)
-        if busy:
-            self._elapsed = 0
-            self._message = message
-            self.status.setText(f"{message} · 0s")
-            self._timer.start()
-        else:
-            self._timer.stop()
-            self.status.setText("")
-
-    def _tick(self):
-        self._elapsed += 1
-        self.status.setText(f"{self._message} · {self._elapsed}s")
-
-    def _on_progress(self, label: str):
-        self._message = label
-        self.status.setText(f"{label} · {self._elapsed}s")
-
-    def _fail(self, message: str):
-        self._set_busy(False)
-        self.status.setText("Failed — see log")
-        self.log.emit(f"ERROR  {message}")
-
-    # ---- fill all ----------------------------------------------------------
-
-    def autofill(self):
-        if not self.project or not self.project.scenes:
-            return
-        if not self._sources() and not self._local_folder():
-            self.log.emit("Pick at least one source.")
-            return
-
-        self._set_busy(True, "Finding footage")
-        self.log.emit(f"Footage · {', '.join(self._sources()) or 'local folder'}")
-        run_async(
-            self, _autofill, self._on_autofill, self._fail,
-            [{"terms": s.terms, "duration": s.duration} for s in self.project.scenes],
-            self._sources(), str(project_dir(self.project.id)), self._local_folder(),
-            on_progress=self._on_progress,
-        )
-
-    def _on_autofill(self, results: list):
-        filled = 0
-        for result in results:
-            if not result:
-                continue
-            scene = self.project.scenes[result["index"]]
-            scene.clip_path = result["path"]
-            scene.clip_source = result["source"]
-            scene.clip_thumb = result["thumb"]
-            scene.clip_credit = result["credit"]
-            filled += 1
-        for row in self._rows:
-            row.refresh()
-        self._set_busy(False)
+    def _on_row_changed(self, index: int):
         self._update_total()
         self.projectChanged.emit()
-        missing = len(results) - filled
-        note = f" · {missing} scene(s) found nothing" if missing else ""
-        self.log.emit(f"Footage attached to {filled} scenes{note}")
 
-    # ---- pick one ----------------------------------------------------------
+    # ---- taking from the pool ----------------------------------------------
 
-    def pick_for_scene(self, index: int):
+    def add_from_pool(self, index: int):
+        """Put gathered footage into one scene, splitting its time evenly."""
         if not self.project:
             return
         scene = self.project.scenes[index]
-        if not scene.terms and not self._local_folder():
-            self.log.emit(f"Scene {index + 1} has no keywords to search with.")
+        picker = PoolPicker(self.project, index + 1, self)
+        if not picker.exec():
             return
-
-        self._pick_index = index
-        self._set_busy(True, f"Searching for scene {index + 1}")
-        run_async(
-            self, _search_for_scene, self._on_candidates, self._fail,
-            scene.terms, self._sources(), scene.duration, self._local_folder(),
-            on_progress=self._on_progress,
-        )
-
-    def _on_candidates(self, candidates: list):
-        self._set_busy(False)
-        index = self._pick_index
-        if not candidates:
-            self.log.emit(f"Nothing found for scene {index + 1}.")
-            return
-
-        scene = self.project.scenes[index]
-        picker = ClipPicker(candidates, f"Scene {index + 1} · {', '.join(scene.terms[:3])}", self)
-        if not picker.exec() or not picker.selected:
-            return
-
-        dest = str(project_dir(self.project.id) / f"clip_{index + 1:02d}.mp4")
-        self._set_busy(True, f"Fetching clip for scene {index + 1}")
-        run_async(self, _download_one, self._on_downloaded, self._fail,
-                  picker.selected, dest, on_progress=self._on_progress)
-
-    def _on_downloaded(self, result: dict):
-        index = self._pick_index
-        scene = self.project.scenes[index]
-        scene.clip_path = result["path"]
-        scene.clip_source = result["source"]
-        scene.clip_thumb = result["thumb"]
-        scene.clip_credit = result["credit"]
+        for item in picker.picked_items():
+            scene.visuals.append(Visual(
+                path=item["path"], kind=item["kind"], source="fragment",
+                thumb=item.get("thumb", "")))
+        scene.rebalance()
         self._rows[index].refresh()
-        self._set_busy(False)
         self._update_total()
         self.projectChanged.emit()
-        self.log.emit(f"Scene {index + 1} · {result['source']} clip attached")
+        each = scene.visuals[0].duration if scene.visuals else 0
+        self.log.emit(f"Scene {index + 1} · {len(scene.visuals)} shots, "
+                      f"{each:.1f}s each")
+
+    # ---- drawing the pictures ----------------------------------------------
+
+    def open_frames(self):
+        if not self.project or not self.project.scenes:
+            return
+        self._stop_audio()
+        dialog = FramesDialog(self.project, self.settings, self)
+        dialog.added.connect(self._on_frames_placed)
+        dialog.exec()
+
+    def _on_frames_placed(self):
+        for row in self._rows:
+            row.refresh()
+        self._update_total()
+        self.projectChanged.emit()
+        self._warm_thumbs()      # freshly drawn pictures have no small copy yet
+
+    # ---- cutting the fragment ----------------------------------------------
+
+    def open_cutter(self):
+        if not self.project:
+            return
+        if not self.project.fragment_path or not Path(self.project.fragment_path).exists():
+            self.log.emit("This project has no fragment — it came from a topic "
+                          "whose video was never fetched.")
+            return
+        self._stop_audio()
+        dialog = CutDialog(self.project, self.settings, self)
+        dialog.added.connect(self._on_cut_added)
+        dialog.exec()
+
+    def _on_cut_added(self):
+        self.log.emit("Pieces kept — add them to a scene with + on its row.")
+
+    # ---- listening ---------------------------------------------------------
+
+    def toggle_play(self, index: int):
+        """One player for the whole list: starting a scene stops the last one.
+
+        Nineteen rows each with their own player would let you stack a chorus
+        by clicking around, and there would be no way to stop it.
+        """
+        if self._playing == index:
+            self._stop_audio()
+            return
+        scene = self.project.scenes[index] if self.project else None
+        if not scene or not scene.audio_path or not Path(scene.audio_path).exists():
+            return
+
+        self._stop_audio()
+        if self._player is None:
+            self._player = QMediaPlayer(self)
+            self._audio_out = QAudioOutput(self)
+            self._player.setAudioOutput(self._audio_out)
+            self._player.mediaStatusChanged.connect(self._on_media_status)
+        self._player.setSource(QUrl.fromLocalFile(str(Path(scene.audio_path).resolve())))
+        self._player.play()
+        self._playing = index
+        self._rows[index].set_playing(True)
+
+    def _stop_audio(self):
+        if self._player is not None:
+            self._player.stop()
+        if 0 <= self._playing < len(self._rows):
+            self._rows[self._playing].set_playing(False)
+        self._playing = -1
+
+    def _on_media_status(self, status):
+        if status == QMediaPlayer.EndOfMedia:
+            self._stop_audio()

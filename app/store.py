@@ -1,12 +1,34 @@
 """Project persistence — one JSON index, media under data/projects/<id>/."""
 
 import json
+import shutil
 from datetime import datetime, timezone
 
 from app.models_data import Project, Scene
-from app.paths import DATA_DIR
+from app.paths import DATA_DIR, PROJECTS_DIR
 
 INDEX_PATH = DATA_DIR / "projects.json"
+
+
+def orphan_dirs() -> list:
+    """Project folders on disk with no project left in the index.
+
+    Deleting a project only ever struck it off the list, so its folder stayed
+    behind. That cost nothing while the folders held a render or two, and costs
+    real disk the moment each one carries a cut fragment of source video.
+    """
+    if not PROJECTS_DIR.is_dir():
+        return []
+    try:
+        alive = {p.get("id") for p in json.loads(
+            INDEX_PATH.read_text(encoding="utf-8")).get("projects", [])}
+    except Exception:
+        return []   # unreadable index: assume nothing is orphaned, delete nothing
+    return [d for d in PROJECTS_DIR.iterdir() if d.is_dir() and d.name not in alive]
+
+
+def dir_size(path) -> int:
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
 
 def _now() -> str:
@@ -84,7 +106,7 @@ class Store:
             topic=source.topic,
             language=source.language,
             tone=source.tone,
-            scenes=[Scene(text=s.text, terms=list(s.terms)) for s in source.scenes],
+            scenes=[Scene(text=s.text) for s in source.scenes],
             created_at=_now(),
             updated_at=_now(),
         )
@@ -95,6 +117,9 @@ class Store:
     def delete(self, project_id: str):
         self.projects = [p for p in self.projects if p.id != project_id]
         self.save()
+        # the folder holds the render, the voice track and the cut fragment —
+        # all of it belongs to this project and nothing else refers to it
+        shutil.rmtree(PROJECTS_DIR / project_id, ignore_errors=True)
 
     def get(self, project_id: str):
         return next((p for p in self.projects if p.id == project_id), None)

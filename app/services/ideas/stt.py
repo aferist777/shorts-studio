@@ -7,6 +7,7 @@ script needs. The paid pass costs about eight cents an hour of audio and runs
 two hundred times faster than real time.
 """
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -36,6 +37,33 @@ MAX_CUE_SECONDS = 8.0
 GAP_SECONDS = 0.9
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)")
+
+
+def probe_duration(path: str, ffmpeg_path: str = "") -> float:
+    """Length of a local file in seconds.
+
+    The bundled ffmpeg-static ships no ffprobe, so the number comes off the
+    `Duration:` line ffmpeg prints when handed an input and no output. It
+    appears at once — the container is opened, not decoded — and ffmpeg exits
+    non-zero on purpose in that mode, so the return code says nothing.
+    """
+    ffmpeg = find_ffmpeg(ffmpeg_path)
+    if not ffmpeg:
+        raise RuntimeError("No ffmpeg found. Set its location in Settings.")
+
+    result = subprocess.run(
+        [ffmpeg, "-hide_banner", "-i", path],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        creationflags=_NO_WINDOW, timeout=300,
+    )
+    match = _DURATION_RE.search(result.stderr or "")
+    if not match:
+        raise RuntimeError(
+            f"Could not read “{Path(path).name}” — is it a video or audio file?")
+
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
 def pick_bitrate(duration_seconds: float) -> int:
@@ -74,7 +102,8 @@ def compress(audio_path: str, out_path: str, duration: float = 0.0,
     result = subprocess.run(
         [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", audio_path,
          "-ac", "1", "-ar", str(rate), "-b:a", f"{kbps}k", out_path],
-        capture_output=True, text=True, creationflags=_NO_WINDOW, timeout=1800,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        creationflags=_NO_WINDOW, timeout=1800,
     )
     if result.returncode != 0 or not Path(out_path).exists():
         raise RuntimeError("Could not re-encode the audio:\n" + (result.stderr or "")[-400:])

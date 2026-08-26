@@ -5,18 +5,41 @@ and you should be able to come back months later and mine the topics you
 skipped the first time.
 """
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.paths import CACHE_DIR, DATA_DIR
+from app.paths import CACHE_DIR, DATA_DIR, TRANSCRIPTS_DIR
+from app.services.ideas import fragments
 from app.services.ideas import stt as stt_module
 from app.services.ideas import topics as topics_module
 from app.services.ideas import youtube
 
 INDEX_PATH = DATA_DIR / "ideas.json"
-TRANSCRIPT_DIR = CACHE_DIR / "transcripts"
+TRANSCRIPT_DIR = TRANSCRIPTS_DIR
 AUDIO_DIR = CACHE_DIR / "audio"
+_OLD_TRANSCRIPT_DIR = CACHE_DIR / "transcripts"
+
+
+def _rescue_transcripts():
+    """Carry transcripts out of the cache folder they used to live in.
+
+    Runs once and then finds nothing. Copies rather than renames when a file of
+    the same name already waits at the destination, so nothing is overwritten.
+    """
+    if not _OLD_TRANSCRIPT_DIR.is_dir():
+        return
+    TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+    for old in _OLD_TRANSCRIPT_DIR.glob("*.json"):
+        target = TRANSCRIPT_DIR / old.name
+        if not target.exists():
+            old.replace(target)
+    if not any(_OLD_TRANSCRIPT_DIR.iterdir()):
+        _OLD_TRANSCRIPT_DIR.rmdir()
+
+
+_rescue_transcripts()
 
 
 def _now() -> str:
@@ -37,6 +60,36 @@ def load_index() -> list:
 def save_index(videos: list):
     INDEX_PATH.write_text(json.dumps({"videos": videos}, ensure_ascii=False, indent=2),
                           encoding="utf-8")
+
+
+def file_id(path: str) -> str:
+    """A stable id for a local file, so picking it again finds its transcript.
+
+    Name and size rather than contents: hashing half a gigabyte to answer
+    "have I seen this before" would cost more than the answer is worth.
+    """
+    p = Path(path)
+    stamp = f"{p.name}:{p.stat().st_size}"
+    return "file_" + hashlib.sha1(stamp.encode("utf-8")).hexdigest()[:10]
+
+
+def info_from_file(path: str, settings: dict) -> dict:
+    """What fetch_info returns, for a video that never came from YouTube."""
+    p = Path(path)
+    if not p.exists():
+        raise RuntimeError("That file is gone.")
+    return {
+        "video_id": file_id(str(p)),
+        "url": "",
+        "local_path": str(p),
+        "title": p.stem,
+        "channel": "",
+        "duration": stt_module.probe_duration(str(p), settings.get("ffmpeg_path", "")),
+        "description": "",
+        "language": "",
+        "subtitles": {},
+        "automatic_captions": {},
+    }
 
 
 def get_entry(video_id: str) -> dict:
@@ -95,6 +148,19 @@ def prepare(url: str, cookies: str = "", progress=None) -> dict:
             "source": entry.get("source", "cache" if cues else ""), "entry": entry}
 
 
+def prepare_file(path: str, settings: dict, progress=None) -> dict:
+    """prepare(), for a video sitting on disk instead of behind a link."""
+    if progress:
+        progress("Reading the file")
+    info = info_from_file(path, settings)
+    entry = get_entry(info["video_id"])
+    cues = cached_cues(info["video_id"])
+    if cues and progress:
+        progress("Using the cached transcript")
+    return {"info": info, "cues": cues,
+            "source": entry.get("source", "cache" if cues else ""), "entry": entry}
+
+
 def transcribe_video(info: dict, settings: dict, cookies: str = "",
                      progress=None) -> dict:
     """Speech-to-text first; a video's own hand-made subtitles are the fallback.
@@ -104,9 +170,17 @@ def transcribe_video(info: dict, settings: dict, cookies: str = "",
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     audio = compact = ""
     try:
-        if progress:
-            progress("Downloading audio")
-        audio = youtube.download_audio(info["url"], str(AUDIO_DIR), cookies, progress)
+        # One trip to YouTube, not two. The whole video comes down now and
+        # stays put: the sound for this transcript is taken out of it locally,
+        # and the fragments for whatever projects follow are cut from the same
+        # file. Asking twice would only double the chance of being refused.
+        # A video handed over from disk skips the trip entirely.
+        video = info.get("local_path") or fragments.download_source(
+            info["url"], info["video_id"], cookies, progress)
+
+        audio = str(AUDIO_DIR / f"{info['video_id']}.m4a")
+        fragments.extract_audio(video, audio, settings.get("ffmpeg_path", ""),
+                                progress)
 
         compact = str(AUDIO_DIR / f"{info['video_id']}.mp3")
         stt_module.compress(audio, compact, info.get("duration", 0),
@@ -150,6 +224,9 @@ def find_topics(info: dict, cues: list, settings: dict, source: str = "",
         "video_summary": result["video_summary"],
         "topics": result["topics"],
     }
+    if info.get("local_path"):
+        # remembered so the fragments can be cut later without asking again
+        entry["local_path"] = info["local_path"]
     put_entry(entry)
     return entry
 

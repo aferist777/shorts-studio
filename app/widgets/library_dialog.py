@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.paths import project_dir
-from app.services import library
+from app.services import library, thumbs
 from app.services.worker import run_async
 
 THUMB_W, THUMB_H = 45, 80
@@ -45,7 +45,7 @@ class LibraryRow(QFrame):
         self.thumb.setObjectName("ClipThumb")
         self.thumb.setFixedSize(THUMB_W, THUMB_H)
         self.thumb.setAlignment(Qt.AlignCenter)
-        pixmap = QPixmap(info["poster"]) if info["poster"] else QPixmap()
+        pixmap = QPixmap(thumbs.small(info["poster"])) if info["poster"] else QPixmap()
         if not pixmap.isNull():
             self.thumb.setPixmap(pixmap.scaled(THUMB_W, THUMB_H, Qt.KeepAspectRatioByExpanding,
                                                Qt.SmoothTransformation))
@@ -290,7 +290,9 @@ class LibraryDialog(QDialog):
                 "id": project.id,
                 "title": project.title,
                 "scenes": [{"clip_path": sc.clip_path, "audio_path": sc.audio_path,
-                            "duration": sc.duration, "words": sc.words}
+                            "duration": sc.duration, "words": sc.words,
+                            "visuals": [{"path": v.path, "duration": v.duration}
+                                        for v in sc.visuals]}
                            for sc in project.scenes],
                 "out": str(work / "render.mp4"),
                 "work": str(work),

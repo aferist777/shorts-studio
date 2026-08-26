@@ -49,14 +49,6 @@ the comments".
 Write in the language you are asked for, and in that language only. Follow the narrator \
 you are given."""
 
-TERMS_SYSTEM = """You pick stock-footage search keywords for a video narration.
-
-For each paragraph, give 2-4 short English search phrases that a stock library like Pexels \
-would actually match. Prefer filmable scenes over abstractions: "man walking rainy street" \
-matches, "the burden of expectation" does not. Keywords are always English even when the \
-narration is not."""
-
-
 def script_user_prompt(topic: str, language: str, paragraphs: int, tone: str,
                        narrator_block: str = "", hook: str = "") -> str:
     return (
@@ -84,19 +76,6 @@ SCRIPT_SCHEMA = {
     "additionalProperties": False,
 }
 
-TERMS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "terms": {
-            "type": "array",
-            "description": "One entry per paragraph, in the same order",
-            "items": {"type": "array", "items": {"type": "string"}},
-        }
-    },
-    "required": ["terms"],
-    "additionalProperties": False,
-}
-
 REWRITE_SYSTEM = SCRIPT_SYSTEM + """
 
 You are rewriting ONE paragraph inside an existing script. The replacement must keep the same \
@@ -113,17 +92,14 @@ def rewrite_user_prompt(topic: str, language: str, tone: str, script: list, inde
     return (
         f"Topic: {topic}\nLanguage: {language}\nTone: {tone}\n\n"
         f"Full script:\n{numbered}\n\n"
-        f"Rewrite paragraph {index + 1} only, and give fresh footage keywords for it."
+        f"Rewrite paragraph {index + 1} only."
     )
 
 
 REWRITE_SCHEMA = {
     "type": "object",
-    "properties": {
-        "paragraph": {"type": "string"},
-        "terms": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": ["paragraph", "terms"],
+    "properties": {"paragraph": {"type": "string"}},
+    "required": ["paragraph"],
     "additionalProperties": False,
 }
 
@@ -209,6 +185,234 @@ def narrator_analysis_user_prompt(samples: list) -> str:
 
 
 # ---- hooks -----------------------------------------------------------------
+
+POSTER_BRIEF = """This one is not a scene. It is the poster for the whole video, and \
+it exists to be shown to the image model as the sample every other picture is drawn to \
+match. So it must be the manner at full strength and nothing else: no character from the \
+story, no moment from the script, nothing the narration says.
+
+Fill it with the background jokes below and the world they live in, packed the way a \
+crowded frame is packed — a few large enough to read at a glance, the rest at the edges.
+
+Write the SAME picture twice:
+- "titled": in the middle of the frame hangs a plain painted board, a banner or a plaque, \
+and the lettering on it reads exactly: {title}
+  Written in {language}, in the lettering of that place and period. Nothing else in the \
+picture carries words this large.
+- "plain": the identical picture with no board, no banner, no plaque and no lettering in \
+the middle — whatever is behind it simply continues.
+
+Everything else — the jokes, where they sit, the light, the colour — is word for word \
+the same in both. They are one drawing photographed twice, not two drawings.
+
+Each between 130 and 160 words."""
+
+POSTER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "titled": {"type": "string", "description": "with the lettering in the middle"},
+        "plain": {"type": "string", "description": "the same picture, no lettering"},
+    },
+    "required": ["titled", "plain"],
+    "additionalProperties": False,
+}
+
+
+def poster_user_prompt(title: str, language: str, jokes: list, world: str = "") -> str:
+    parts = []
+    if world.strip():
+        parts.append(world)
+    parts.append(POSTER_BRIEF.format(title=f"“{title}”", language=language))
+    parts.append("The jokes to fill it with:\n"
+                 + "\n".join(f"- {j}" for j in jokes))
+    return "\n\n".join(parts)
+
+
+WORLD_SYSTEM = """You read a piece of narration and say where and when it happens, \
+in terms an illustrator can draw.
+
+Everything after you works from what you write. A picture of a Soviet tax office and a \
+picture of an American one differ in the badge, the lettering, the furniture and the \
+paper — and nobody downstream will know which to draw unless you say so here.
+
+Answer only from the texts. If they do not settle a thing, choose the most likely \
+reading and keep it plain; never invent a specific year the material does not support.
+
+The period is what will be DRAWN, so it must be one decade, not a span. A story can run \
+across fifty years — a law passed in one decade and repealed in another — but a picture \
+cannot be set in fifty years, and asked for a span the illustrator will drift to whichever \
+end it likes. Name the decade where most of the story happens, and if the whole span \
+matters, put it in the same field afterwards as background: "1940s (the law itself runs \
+to 1991)".
+
+Name no real person, living or dead, in any field. A portrait on an office wall is "a \
+framed official portrait", never whose. Everything after you is forbidden to draw a real \
+person, and it cannot obey that if you have already asked for one.
+
+For each field give concrete, drawable nouns — no adjectives standing alone, no history \
+lesson, two lines each at most.
+
+- place: the country and the kind of settlement
+- period: the decade or the span of years
+- architecture: buildings and interiors as they would be drawn
+- dress: what ordinary people and officials wear
+- objects: documents, money, machines, tools that belong to this world
+- signage: the language written on signs, and how the lettering looks
+- props: three or four things that could recur across many pictures
+
+Write in English, except the signage language, which you name plainly \
+("Russian, in Cyrillic")."""
+
+WORLD_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "place": {"type": "string"},
+        "period": {"type": "string"},
+        "architecture": {"type": "string"},
+        "dress": {"type": "string"},
+        "objects": {"type": "string"},
+        "signage": {"type": "string"},
+        "props": {"type": "string"},
+    },
+    "required": ["place", "period", "architecture", "dress", "objects",
+                 "signage", "props"],
+    "additionalProperties": False,
+}
+
+WORLD_FIELDS = ["place", "period", "architecture", "dress", "objects",
+                "signage", "props"]
+
+
+def world_user_prompt(topic: str, script: str, source_text: str = "") -> str:
+    parts = [f"The video is about: {topic}"]
+    if source_text.strip():
+        # the original keeps names and dates the retelling drops
+        parts.append(f"WHAT THE ORIGINAL SOURCE SAID\n{source_text[:6000]}")
+    parts.append(f"THE NARRATION AS IT WILL BE SPOKEN\n{script[:6000]}")
+    parts.append("Say where and when this happens.")
+    return "\n\n".join(parts)
+
+
+DETAILS_SYSTEM = """You invent small background jokes for an illustrated video.
+
+These are the things that live at the edges of a busy drawing — a sign with the wrong \
+word on it, a dog stealing something in the corner, a bored official asleep behind the \
+main action, a poster peeling off a wall. They do not advance what is being said. They \
+reward the viewer who looks twice, and they are what makes a crowded frame worth \
+crowding.
+
+Rules that make them usable:
+- Each one must be DRAWABLE in a corner of a frame, in one short phrase. "A rat in a \
+tiny uniform saluting" works. "A sense of bureaucratic despair" does not.
+- Each must belong to the world of THIS video. If it is about a tax on eggs, the jokes \
+are about chickens, forms, queues and inspectors — not about generic funny animals.
+- They must not repeat each other. Forty variations on a queue is one joke, not forty.
+- Nothing that depends on words a viewer must read closely. A sign can be absurd by its \
+picture; a paragraph of small print cannot.
+- No named real people, no logos, no characters from existing publications.
+
+Spread them across kinds so a handful picked at random never comes out all the same: \
+signs and notices, animals behaving oddly, minor people caught mid-blunder, objects out \
+of place, small disasters in progress.
+
+Each also has a SCALE, and the two are used differently:
+- big: it goes in the middle ground, drawn large enough to be caught on a first watch. \
+This is what tells a viewer the picture is worth a second look. Give it something with \
+a shape at a distance — a whole animal, a person mid-fall, a machine coming apart.
+- small: it hides at an edge or in a corner and rewards the one who looks again. It can \
+be finer — a hand doing something odd, a creature under a table, an object out of place.
+
+Give roughly one big for every two small.
+
+Write in English, one phrase each."""
+
+DETAILS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "details": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string",
+                             "description": "sign, animal, person, object or mishap"},
+                    "detail": {"type": "string",
+                               "description": "one drawable phrase"},
+                    "scale": {"type": "string",
+                              "description": "big for the middle ground, "
+                                             "small for the edges"},
+                },
+                "required": ["kind", "detail", "scale"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["details"],
+    "additionalProperties": False,
+}
+
+
+def details_user_prompt(script: str, topic: str, count: int) -> str:
+    return (f"The video is about: {topic}\n\n"
+            f"THE WHOLE NARRATION\n{script[:9000]}\n\n"
+            f"Invent {count} background jokes for this world.")
+
+
+SHOTS_SYSTEM = """You break one beat of narration into separate pictures.
+
+Describe what is in each picture and nothing else: who is there, what they are doing, \
+where it happens, and how close the camera is. No drawing style, no mood words, no \
+colours — that is decided later and by somebody else.
+
+The pictures of one beat must show DIFFERENT things. Vary two axes at once:
+- how close: a wide view of the place, a face filling the frame, an object filling the \
+frame, a small detail of the surroundings
+- what is looked at: the person acting, the person reacting, the thing being talked \
+about, the place itself
+
+Four restagings of the same moment from four angles is a failure. Each picture earns \
+its place by showing something the others do not.
+
+NEVER leave the subject empty. If no particular character belongs in a picture, put \
+something else living or telling in it — a crowd going about its business, a queue, a \
+street full of signs and clutter, a room busy with objects. An empty frame is not an \
+option; a frame without a main character is.
+
+Write in English, plainly, one short sentence per field."""
+
+SHOTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "shots": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string",
+                                "description": "Who or what fills the frame — never empty"},
+                    "action": {"type": "string", "description": "What is happening"},
+                    "place": {"type": "string", "description": "Where it happens"},
+                    "framing": {"type": "string",
+                                "description": "wide, medium, close-up or detail"},
+                },
+                "required": ["subject", "action", "place", "framing"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["shots"],
+    "additionalProperties": False,
+}
+
+
+def shots_user_prompt(beat: str, count: int, topic: str = "") -> str:
+    parts = []
+    if topic:
+        parts.append(f"The video is about: {topic}")
+    parts.append(f"The beat being spoken:\n{beat}")
+    parts.append(f"Give exactly {count} pictures, each showing something different.")
+    return "\n\n".join(parts)
+
 
 HOOKS_SYSTEM = f"""You write opening lines for vertical short-form video.
 

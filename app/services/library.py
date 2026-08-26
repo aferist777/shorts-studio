@@ -34,11 +34,32 @@ def poster_for(video_path: str) -> str:
     return extract_thumbnail(video_path, str(poster), at=0.5, height=640)
 
 
+# the four things that have to happen to a project, each worth the same. Four
+# equal steps mean the only possible answers are 0, 25, 50, 75 and 100 — which
+# is what lets the project list filter on named percentages instead of ranges.
+STAGES = [0, 25, 50, 75, 100]
+
+
+def progress_pct(project) -> int:
+    """How far along a project is, as one number."""
+    scenes = project.scenes
+    if not scenes:
+        return 0
+    done = 1
+    if all(s.audio_path for s in scenes):
+        done += 1
+    if all(s.shots for s in scenes):
+        done += 1
+    if render_path(project.id).exists():
+        done += 1
+    return done * 25
+
+
 def project_state(project) -> str:
     if render_path(project.id).exists():
         return RENDERED
     scenes = project.scenes
-    if scenes and all(s.audio_path and s.clip_path for s in scenes):
+    if scenes and all(s.audio_path and s.shots for s in scenes):
         return READY
     return DRAFT
 

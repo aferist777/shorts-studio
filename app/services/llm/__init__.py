@@ -129,27 +129,9 @@ def analyse_narrator(settings: dict, samples: list) -> dict:
     )
 
 
-def generate_terms(settings: dict, paragraphs: list, topic: str) -> list:
-    """-> [[str, ...], ...] aligned with `paragraphs` (padded if the model is short)."""
-    numbered = "\n\n".join(f"[{i + 1}] {p}" for i, p in enumerate(paragraphs))
-    user = f"Overall topic: {topic}\n\nParagraphs:\n{numbered}"
-    data = call_json(
-        settings["llm_provider"],
-        settings["llm_model"],
-        "low",  # keyword extraction is not reasoning-heavy
-        prompts.TERMS_SYSTEM,
-        user,
-        prompts.TERMS_SCHEMA,
-    )
-    terms = data.get("terms", [])
-    while len(terms) < len(paragraphs):
-        terms.append([])
-    return [[str(t) for t in group][:4] for group in terms[: len(paragraphs)]]
-
-
 def rewrite_paragraph(settings: dict, topic: str, language: str, tone: str,
                       script: list, index: int) -> dict:
-    """-> {"paragraph": str, "terms": [str, ...]} for one scene, in context."""
+    """-> {"paragraph": str} for one scene, rewritten in context."""
     data = call_json(
         settings["llm_provider"],
         settings["llm_model"],
@@ -161,4 +143,4 @@ def rewrite_paragraph(settings: dict, topic: str, language: str, tone: str,
     text = (data.get("paragraph") or "").strip()
     if not text:
         raise RuntimeError("The model returned an empty paragraph.")
-    return {"paragraph": text, "terms": [str(t) for t in data.get("terms", [])][:4]}
+    return {"paragraph": text}

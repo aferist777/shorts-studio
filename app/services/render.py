@@ -22,6 +22,114 @@ _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 FIT = (f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
        f"crop={WIDTH}:{HEIGHT},fps={FPS},setsar=1")
 
+STILLS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+# A frame held motionless for three seconds reads as a stall rather than a
+# choice. 12% of travel over its whole turn is below the threshold where
+# anyone notices the movement itself.
+KEN_BURNS_ZOOM = 1.12
+
+# what a still can do while it is on screen; the ids are what settings store
+MOTIONS = [
+    ("none", "Hold still"),
+    ("zoom_in", "Push in"),
+    ("zoom_out", "Pull out"),
+    ("pan_left", "Pan left"),
+    ("pan_right", "Pan right"),
+    ("pan_up", "Pan up"),
+    ("pan_down", "Pan down"),
+    ("varied", "Vary it"),
+]
+_CYCLE = ["zoom_in", "pan_right", "zoom_out", "pan_left", "zoom_in", "pan_up"]
+
+# A true cross-dissolve needs neighbouring shots to overlap, which shortens the
+# timeline and pulls the picture away from the voice — fixable, but it also
+# wants every segment in one filter graph, and a nineteen-scene project has
+# dozens. A dip happens inside a segment that already exists: nothing moves,
+# nothing costs more.
+TRANSITIONS = [
+    ("none", "Straight cut"),
+    ("black", "Dip to black"),
+    ("white", "Dip to white"),
+]
+
+
+def _is_still(path: str) -> bool:
+    return Path(path).suffix.lower() in STILLS
+
+
+def _motion_for(motion: str, index: int) -> str:
+    if motion == "varied":
+        return _CYCLE[index % len(_CYCLE)]
+    return motion or "zoom_in"
+
+
+def _still_filter(seconds: float, motion: str = "zoom_in", index: int = 0) -> str:
+    """How a saved frame behaves for the seconds it is on screen."""
+    frames = max(2, int(round(seconds * FPS)))
+    kind = _motion_for(motion, index)
+    # the input is padded well past output size first, so there is room to move
+    # inside it without ever showing an edge
+    base = (f"scale={WIDTH * 2}:{HEIGHT * 2}:force_original_aspect_ratio=increase,"
+            f"crop={WIDTH * 2}:{HEIGHT * 2}")
+
+    if kind == "none":
+        return f"{base},scale={WIDTH}:{HEIGHT},fps={FPS},setsar=1"
+
+    step = (KEN_BURNS_ZOOM - 1.0) / frames
+    if kind == "zoom_in":
+        z = f"min(zoom+{step:.6f},{KEN_BURNS_ZOOM})"
+        x, y = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+    elif kind == "zoom_out":
+        # zoompan has no way to start zoomed in, so the expression counts down
+        z = f"max({KEN_BURNS_ZOOM}-on*{step:.6f},1.0)"
+        x, y = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+    else:
+        # a pan holds a constant crop and walks it across the padded frame
+        z = f"{KEN_BURNS_ZOOM}"
+        travel = f"(iw-iw/zoom)"
+        travel_y = f"(ih-ih/zoom)"
+        moves = {
+            "pan_left": (f"{travel}*(1-on/{frames})", "ih/2-(ih/zoom/2)"),
+            "pan_right": (f"{travel}*on/{frames}", "ih/2-(ih/zoom/2)"),
+            "pan_up": ("iw/2-(iw/zoom/2)", f"{travel_y}*(1-on/{frames})"),
+            "pan_down": ("iw/2-(iw/zoom/2)", f"{travel_y}*on/{frames}"),
+        }
+        x, y = moves.get(kind, ("iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"))
+
+    return (f"{base},zoompan=z='{z}':d={frames}:x='{x}':y='{y}'"
+            f":s={WIDTH}x{HEIGHT}:fps={FPS},setsar=1")
+
+
+def _dip(seconds: float, kind: str, length: float) -> str:
+    """Fade in and out of a shot, so cuts land softly."""
+    if kind not in ("black", "white") or length <= 0:
+        return ""
+    # never eat more than a third of a shot at each end, or a short piece is
+    # nothing but the fade
+    span = min(length, seconds / 3)
+    colour = ":c=white" if kind == "white" else ""
+    return (f",fade=t=in:st=0:d={span:.3f}{colour}"
+            f",fade=t=out:st={max(0.0, seconds - span):.3f}:d={span:.3f}{colour}")
+
+
+def shots_of(scene: dict) -> list:
+    """Every visual a scene shows, in order. -> [{'path', 'duration'}]
+
+    A scene used to hold one clip stretched over the whole line; it now holds a
+    list that shares the same seconds between them. Projects written before
+    that still arrive with a single `clip_path`, and are read as a list of one.
+    """
+    visuals = scene.get("visuals") or []
+    length = float(scene.get("duration") or 0)
+    kept = [v for v in visuals if v.get("path")]
+    if not kept:
+        return [{"path": scene.get("clip_path", ""), "duration": length}]
+
+    # trust the scene's own length over the stored shares: re-voicing a line
+    # changes the total and the parts have to follow it, not the other way round
+    each = length / len(kept)
+    return [{"path": v["path"], "duration": each} for v in kept]
+
 
 def _run(args: list, cwd: str, total: float = 0.0, on_pct=None,
          base: int = 0, span: int = 0) -> None:
@@ -51,13 +159,21 @@ def _quote_concat(name: str) -> str:
 
 def render(scenes: list, out_path: str, work_dir: str, style: dict,
            bgm_path: str = "", bgm_volume: float = 0.12, ffmpeg_path: str = "",
+           motion: str = "zoom_in", transition: str = "none",
+           transition_len: float = 0.25,
            progress=None, progress_pct=None) -> dict:
-    """`scenes` are dicts with clip_path, audio_path, duration and words."""
+    """`scenes` are dicts with visuals, audio_path, duration and words.
+
+    `motion` is how a still behaves on screen and `transition` how each shot
+    enters and leaves — both apply to every shot in the video, which is what
+    keeps a project looking like one piece.
+    """
     ffmpeg = find_ffmpeg(ffmpeg_path)
     if not ffmpeg:
         raise RuntimeError("No ffmpeg found. Set its location in Settings.")
 
-    missing_clip = [i + 1 for i, s in enumerate(scenes) if not s.get("clip_path")]
+    missing_clip = [i + 1 for i, s in enumerate(scenes)
+                    if not any(v.get("path") for v in shots_of(s))]
     missing_audio = [i + 1 for i, s in enumerate(scenes) if not s.get("audio_path")]
     if missing_clip:
         raise RuntimeError(f"No footage on scene(s): {', '.join(map(str, missing_clip))}")
@@ -72,24 +188,39 @@ def render(scenes: list, out_path: str, work_dir: str, style: dict,
         progress("Writing subtitles")
     (work / "subs.ass").write_text(subtitles.build_ass(scenes, style), encoding="utf-8")
 
-    # ---- pass 1: one normalised silent segment per scene --------------------
+    # ---- pass 1: one normalised silent segment per shot ---------------------
+    # A scene can hold several shots taking turns, so the segment list is
+    # longer than the scene list. Their durations still add up to the scene's
+    # own length, which is what keeps picture and narration in step.
+    plan = [(i, shot) for i, scene in enumerate(scenes) for shot in shots_of(scene)]
     segments = []
-    for i, scene in enumerate(scenes):
-        name = f"seg_{i + 1:02d}.mp4"
+    for n, (scene_index, shot) in enumerate(plan):
+        name = f"seg_{n + 1:03d}.mp4"
+        seconds = float(shot["duration"])
+        source = str(Path(shot["path"]).resolve())
         if progress:
-            progress(f"Fitting clip {i + 1} of {len(scenes)}")
+            progress(f"Fitting shot {n + 1} of {len(plan)} "
+                     f"(scene {scene_index + 1})")
+
+        if _is_still(source):
+            head = ["-loop", "1", "-i", source]
+            chain = _still_filter(seconds, motion, n)
+        else:
+            # a clip shorter than its slot repeats rather than freezing
+            head = ["-stream_loop", "-1", "-i", source]
+            chain = FIT
+        chain += _dip(seconds, transition, transition_len)
+
         _run([
             ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-            "-stream_loop", "-1", "-i", str(Path(scene["clip_path"]).resolve()),
-            "-t", f"{float(scene['duration']):.3f}",
-            "-vf", FIT, "-an",
+            *head, "-t", f"{seconds:.3f}", "-vf", chain, "-an",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
             "-pix_fmt", "yuv420p", "-g", str(FPS * 2),
             name,
         ], cwd=str(work))
         segments.append(name)
         if progress_pct:
-            progress_pct(int(55 * (i + 1) / len(scenes)))
+            progress_pct(int(55 * (n + 1) / len(plan)))
 
     (work / "video.txt").write_text(
         "\n".join(_quote_concat(n) for n in segments) + "\n", encoding="utf-8")

@@ -1,18 +1,73 @@
 """New ideas — a long video in, several projects out."""
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from pathlib import Path
+
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QProgressBar, QPushButton, QScrollArea, QStyle,
+    QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
 from app.services import ideas
 from app.services.worker import run_async
-from app.widgets.workspace import LANGUAGES, TONES
+from app.widgets.narrators_dialog import MEDIA_FILTER
+from app.widgets.script_step import LANGUAGES, TONES
+
+ASSETS = Path(__file__).resolve().parent.parent / "assets"
 
 # the dialog opens as a link box and only grows once there is a list to show
 SMALL = (560, 210)
 LARGE = (900, 760)
+
+
+class DropRowDelegate(QStyledItemDelegate):
+    """Draws a × on the right of every saved analysis and reports clicks on it.
+
+    A combo box has no room for a second widget per row, so the cross is
+    painted into the row itself and the click is caught before the item is
+    selected — otherwise removing an entry would also load it.
+    """
+
+    removeRequested = Signal(int)
+    HIT = 26                       # the square at the right edge that counts as the ×
+
+    # taken from the theme rather than the palette: the palette's greys are
+    # tuned for a light background and vanish against this one
+    IDLE = QColor("#6d6a7a")
+    HOT = QColor("#e0736e")
+
+    BACKING = QColor("#1b1b22")
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        box = option.rect.adjusted(option.rect.width() - self.HIT, 0, 0, 0)
+        hovered = bool(option.state & QStyle.State_MouseOver)
+        painter.save()
+        # the row's own text runs the full width, so the cross needs its own
+        # patch of background or it lands on top of the title and disappears
+        painter.fillRect(box, self.BACKING)
+        font = painter.font()
+        font.setPointSize(font.pointSize() + 3)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(self.HOT if hovered else self.IDLE)
+        painter.drawText(box, Qt.AlignCenter, "×")
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        size.setHeight(max(size.height(), 26))
+        size.setWidth(size.width() + self.HIT)
+        return size
+
+    def editorEvent(self, event, model, option, index):
+        if (event.type() == QEvent.MouseButtonRelease
+                and event.pos().x() >= option.rect.right() - self.HIT):
+            self.removeRequested.emit(index.row())
+            return True
+        return super().editorEvent(event, model, option, index)
 
 
 def _clock(seconds: float) -> str:
@@ -80,6 +135,12 @@ class TopicCard(QFrame):
     def is_checked(self) -> bool:
         return self.check.isChecked()
 
+    def set_checked(self, value: bool):
+        """Tick without announcing it — the caller refreshes the count once."""
+        self.check.blockSignals(True)
+        self.check.setChecked(value)
+        self.check.blockSignals(False)
+
     def payload(self) -> dict:
         return {**self.topic, "project_name": self.name.text().strip()
                 or self.topic.get("title", "Untitled")}
@@ -97,6 +158,7 @@ class IdeasDialog(QDialog):
         self._info = {}
         self._cues = []
         self._source = ""
+        self._local_file = ""   # set when a video was picked off the disk
         self._cards = []
         self._elapsed = 0
         self._message = ""
@@ -109,9 +171,10 @@ class IdeasDialog(QDialog):
         title = QLabel("New ideas")
         title.setObjectName("DlgTitle")
         root.addWidget(title)
-        hint = QLabel("Paste a YouTube link, or pick a video you have already analysed. "
-                      "Its topics become projects, each keeping its slice of the "
-                      "transcript and its timecodes.")
+        hint = QLabel("Paste a YouTube link, choose a video file with the folder "
+                      "button, or pick one you have already analysed. Its topics "
+                      "become projects, each keeping its slice of the transcript "
+                      "and its timecodes.")
         hint.setObjectName("Hint")
         hint.setWordWrap(True)
         root.addWidget(hint)
@@ -131,11 +194,24 @@ class IdeasDialog(QDialog):
         self.url.lineEdit().setPlaceholderText("https://www.youtube.com/watch?v=…")
         self.url.lineEdit().returnPressed.connect(self.analyse)
         self.url.activated.connect(self._pick_saved)
+        self._rows = DropRowDelegate(self.url)
+        self._rows.removeRequested.connect(self.forget_saved)
+        self.url.view().setItemDelegate(self._rows)
+        self.file_btn = QPushButton()
+        self.file_btn.setIcon(QIcon(str(ASSETS / "folder.svg")))
+        self.file_btn.setIconSize(QSize(17, 17))
+        self.file_btn.setFixedWidth(40)
+        self.file_btn.setCursor(Qt.PointingHandCursor)
+        self.file_btn.setToolTip(
+            "Analyse a video already on your disk — the way round YouTube "
+            "refusing to hand one over")
+        self.file_btn.clicked.connect(self.pick_file)
         self.analyse_btn = QPushButton("Analyse")
         self.analyse_btn.setObjectName("Primary")
         self.analyse_btn.setCursor(Qt.PointingHandCursor)
         self.analyse_btn.clicked.connect(self.analyse)
         url_row.addWidget(self.url, 1)
+        url_row.addWidget(self.file_btn)
         url_row.addWidget(self.analyse_btn)
         root.addLayout(url_row)
         self._reload_saved()
@@ -178,6 +254,11 @@ class IdeasDialog(QDialog):
         self.tone = QComboBox()
         self.tone.addItems(TONES)
         self.tone.setCurrentText(settings.get("tone", "Conversational"))
+        self.all_btn = QPushButton("Select all")
+        self.all_btn.setCursor(Qt.PointingHandCursor)
+        # the label follows the state, so the next press is never a guess
+        self.all_btn.setMinimumWidth(96)
+        self.all_btn.clicked.connect(self.toggle_all)
         self.create_btn = QPushButton("Create projects")
         self.create_btn.setObjectName("Primary")
         self.create_btn.setCursor(Qt.PointingHandCursor)
@@ -190,6 +271,7 @@ class IdeasDialog(QDialog):
         footer_lay.addWidget(QLabel("Tone"))
         footer_lay.addWidget(self.tone)
         footer_lay.addStretch(1)
+        footer_lay.addWidget(self.all_btn)
         footer_lay.addWidget(self.create_btn)
         self.footer.setVisible(False)
         root.addWidget(self.footer)
@@ -203,6 +285,7 @@ class IdeasDialog(QDialog):
     def _set_busy(self, busy: bool, message: str = ""):
         self.progress.setVisible(busy)
         self.analyse_btn.setEnabled(not busy)
+        self.file_btn.setEnabled(not busy)
         self.url.setEnabled(not busy)
         self.create_btn.setEnabled(not busy and bool(self._checked()))
         if busy:
@@ -236,10 +319,18 @@ class IdeasDialog(QDialog):
             topics = video.get("topics", [])
             used = sum(1 for t in topics if t.get("used_by"))
             minutes = int(video.get("duration", 0)) // 60
-            label = f"{video.get('title', 'Untitled')}  ·  {minutes} min · {len(topics)} topics"
+            # kept short on purpose: the row also carries a × at its right edge,
+            # and a full-length title runs straight under it
+            title = video.get("title", "Untitled")
+            if len(title) > 42:
+                title = title[:41].rstrip() + "…"
+            label = f"{title}  ·  {minutes} min · {len(topics)} topics"
             if used:
                 label += f", {used} used"
-            self.url.addItem(label, video.get("url", ""))
+            if video.get("local_path"):
+                label += " · file"
+            self.url.addItem(label, {"url": video.get("url", ""),
+                                     "local_path": video.get("local_path", "")})
         self.url.setCurrentIndex(-1)
         self.url.setEditText(typed)
         self.url.blockSignals(False)
@@ -250,11 +341,40 @@ class IdeasDialog(QDialog):
                       for i in range(self.url.count())), default=0)
         self.url.view().setMinimumWidth(min(760, widest + 40))
 
-    def _pick_saved(self, index: int):
-        url = self.url.itemData(index)
-        if not url:
+    def forget_saved(self, row: int):
+        """Drop one analysed video from the list.
+
+        The transcript is deliberately left where it is: re-analysing costs
+        nothing once the speech-to-text has been paid for, and the row can be
+        rebuilt from it in seconds.
+        """
+        videos = ideas.load_index()
+        if not 0 <= row < len(videos):
             return
-        self.url.setEditText(url)   # the field always shows what will be analysed
+        entry = videos[row]
+        used = sum(1 for t in entry.get("topics", []) if t.get("used_by"))
+        note = (f"\n\n{used} of its topics already became projects — those stay."
+                if used else "")
+        confirm = QMessageBox.question(
+            self, "Forget this video",
+            f"Remove “{entry.get('title', 'Untitled')}” from the ideas base?{note}",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if confirm != QMessageBox.Yes:
+            return
+
+        ideas.save_index([v for v in videos if v is not entry])
+        self.url.hidePopup()
+        self._reload_saved()
+        self.status.setText(f"Removed “{entry.get('title', '')[:40]}”")
+
+    def _pick_saved(self, index: int):
+        stored = self.url.itemData(index) or {}
+        # a saved analysis remembers whichever it came from, link or file
+        target = stored.get("local_path") or stored.get("url")
+        if not target:
+            return
+        self._local_file = stored.get("local_path", "")
+        self.url.setEditText(target)   # the field always shows what will be analysed
         self.analyse()
 
     def _resize_to(self, size: tuple):
@@ -265,19 +385,42 @@ class IdeasDialog(QDialog):
         frame.moveCenter(centre)
         self.move(frame.topLeft())
 
-    def analyse(self):
-        url = self.url.currentText().strip()
-        if not url.startswith("http"):
-            self.url.setFocus()
-            self.status.setText("Paste a link, or pick a video from the list.")
+    def pick_file(self):
+        """Analyse a video from disk — for the ones YouTube will not hand over."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Video file to analyse", "", MEDIA_FILTER)
+        if not path:
             return
+        self._local_file = path
+        # the field always shows what will be analysed, link or path alike
+        self.url.setEditText(path)
+        self.analyse()
+
+    def analyse(self):
+        typed = self.url.currentText().strip()
+        # editing the field by hand means the earlier file is no longer meant
+        if self._local_file and typed != self._local_file:
+            self._local_file = ""
+
+        if not self._local_file and not typed.startswith("http"):
+            self.url.setFocus()
+            self.status.setText(
+                "Paste a link, pick a saved video, or choose a file with the "
+                "folder button.")
+            return
+
         self._cost = 0.0
         self._clear_cards()
         self._resize_to(SMALL)
         self._set_busy(True, "Reading the video")
-        run_async(self, ideas.prepare, self._on_prepared, self._fail,
-                  url, self.settings.get("cookies_path", ""),
-                  on_progress=self._on_progress)
+        if self._local_file:
+            run_async(self, ideas.prepare_file, self._on_prepared, self._fail,
+                      self._local_file, self.settings,
+                      on_progress=self._on_progress)
+        else:
+            run_async(self, ideas.prepare, self._on_prepared, self._fail,
+                      typed, self.settings.get("cookies_path", ""),
+                      on_progress=self._on_progress)
 
     def _on_prepared(self, result: dict):
         self._info = result["info"]
@@ -358,10 +501,22 @@ class IdeasDialog(QDialog):
     def _checked(self) -> list:
         return [c for c in self._cards if c.is_checked()]
 
+    def toggle_all(self):
+        """Tick every topic, or clear them all if they are already ticked."""
+        target = len(self._checked()) < len(self._cards)
+        for card in self._cards:
+            card.set_checked(target)
+        self._refresh_create()
+
     def _refresh_create(self):
         count = len(self._checked())
-        self.create_btn.setText(f"Create {count} projects" if count else "Create projects")
+        plural = "" if count == 1 else "s"
+        self.create_btn.setText(
+            f"Create {count} project{plural}" if count else "Create projects")
         self.create_btn.setEnabled(count > 0)
+        self.all_btn.setText(
+            "Clear all" if self._cards and count == len(self._cards) else "Select all")
+        self.all_btn.setEnabled(bool(self._cards))
 
     # ---- creation ----------------------------------------------------------
 

@@ -108,3 +108,39 @@ def transcribe_link(url: str, settings: dict, cookies: str = "", progress=None) 
         for leftover in (audio, compact):
             if leftover:
                 Path(leftover).unlink(missing_ok=True)
+
+
+def transcribe_file(path: str, settings: dict, progress=None) -> dict:
+    """Turn a video or audio file on disk into a writing sample.
+
+    The route that does not depend on YouTube's mood. The chosen file is only
+    read: what goes to the model is a compressed copy in the cache, and that
+    copy is removed afterwards whatever happens.
+
+    ffmpeg needs no help picking the audio out of a video container — asking it
+    for mp3 makes it ignore the video stream on its own.
+    """
+    from app.services.ideas import stt
+
+    source = Path(path)
+    if not source.exists():
+        raise RuntimeError("That file is gone.")
+
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    compact = str(AUDIO_DIR / f"{source.stem[:60]}.mp3")
+    try:
+        if progress:
+            progress("Reading the file")
+        ffmpeg = settings.get("ffmpeg_path", "")
+        duration = stt.probe_duration(str(source), ffmpeg)
+
+        stt.compress(str(source), compact, duration, ffmpeg, progress)
+
+        result = stt.transcribe(
+            compact, settings.get("stt_model", stt.DEFAULT_MODEL), progress)
+        text = " ".join(cue["text"] for cue in result["cues"])
+        return {"kind": "file", "label": source.name, "path": str(source),
+                "text": text}
+
+    finally:
+        Path(compact).unlink(missing_ok=True)

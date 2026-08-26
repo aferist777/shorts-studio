@@ -6,12 +6,12 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QProgressBar, QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from app.paths import project_dir
-from app.services import render
+from app.services import frames, kie_images, pool, render
 from app.services.worker import run_async
 
 FONTS = ["Arial", "Arial Black", "Impact", "Verdana", "Tahoma", "Trebuchet MS", "Georgia"]
@@ -79,6 +79,40 @@ class RenderStep(QWidget):
         upper_col.addWidget(self.uppercase)
         style_row.addLayout(upper_col, 0)
         root.addLayout(style_row)
+
+        # how the picture behaves, as opposed to how the words look — one
+        # setting each, applied to every shot so the video reads as one piece
+        motion_row = QHBoxLayout()
+        motion_row.setSpacing(8)
+        self.motion = QComboBox()
+        for value, label in render.MOTIONS:
+            self.motion.addItem(label, value)
+        self.motion.setToolTip("What a saved frame does while it is on screen")
+        self.transition = QComboBox()
+        for value, label in render.TRANSITIONS:
+            self.transition.addItem(label, value)
+        self.transition.setToolTip("How each shot enters and leaves")
+        self.transition_len = QDoubleSpinBox()
+        self.transition_len.setRange(0.1, 1.0)
+        self.transition_len.setSingleStep(0.05)
+        self.transition_len.setDecimals(2)
+        self.transition_len.setSuffix(" s")
+
+        for label, widget, stretch in [
+            ("STILLS", self.motion, 1),
+            ("BETWEEN SHOTS", self.transition, 1),
+            ("LENGTH", self.transition_len, 0),
+        ]:
+            col = QVBoxLayout()
+            col.setSpacing(3)
+            cap = QLabel(label)
+            cap.setObjectName("FieldLabel")
+            col.addWidget(cap)
+            col.addWidget(widget)
+            motion_row.addLayout(col, stretch)
+        motion_row.addStretch(2)
+        self.transition.currentIndexChanged.connect(self._sync_transition)
+        root.addLayout(motion_row)
 
         self.style_preview = QLabel()
         self.style_preview.setObjectName("SubPreview")
@@ -189,11 +223,24 @@ class RenderStep(QWidget):
         self.margin.setValue(int(s.get("sub_margin_v", 320)))
         self.uppercase.setChecked(bool(s.get("sub_uppercase", True)))
         self.volume.setValue(int(s.get("bgm_volume", 12)))
+        motion = self.motion.findData(s.get("still_motion", "zoom_in"))
+        self.motion.setCurrentIndex(motion if motion >= 0 else 1)
+        move = self.transition.findData(s.get("transition", "none"))
+        self.transition.setCurrentIndex(move if move >= 0 else 0)
+        self.transition_len.setValue(float(s.get("transition_len", 0.25)))
+        self._sync_transition()
         self._refresh_music_label()
+
+    def _sync_transition(self):
+        """A straight cut has no length to set."""
+        self.transition_len.setEnabled(self.transition.currentData() != "none")
 
     def _on_style_changed(self):
         """Settings apply straight to the preview — no Apply button."""
         self.settings.update({
+            "still_motion": self.motion.currentData(),
+            "transition": self.transition.currentData(),
+            "transition_len": self.transition_len.value(),
             "sub_font": self.font.currentText(),
             "sub_size": self.size.value(),
             "sub_highlight": self.highlight.currentData(),
@@ -265,7 +312,7 @@ class RenderStep(QWidget):
             self.render_btn.setEnabled(False)
             return
         no_voice = [i + 1 for i, s in enumerate(scenes) if not s.audio_path]
-        no_clip = [i + 1 for i, s in enumerate(scenes) if not s.clip_path]
+        no_clip = [i + 1 for i, s in enumerate(scenes) if not s.shots]
         problems = []
         if no_voice:
             problems.append(f"no voice on {', '.join(map(str, no_voice))}")
@@ -333,7 +380,10 @@ class RenderStep(QWidget):
             "uppercase": self.uppercase.isChecked(),
         }
         scenes = [{"clip_path": s.clip_path, "audio_path": s.audio_path,
-                   "duration": s.duration, "words": s.words} for s in self.project.scenes]
+                   "duration": s.duration, "words": s.words,
+                   "visuals": [{"path": v.path, "duration": v.duration}
+                               for v in s.shots]}
+                  for s in self.project.scenes]
 
         self._set_busy(True, "Rendering")
         self.log.emit(f"Render · {len(scenes)} scenes · {self.font.currentText()} {self.size.value()}px")
@@ -342,6 +392,8 @@ class RenderStep(QWidget):
             scenes, out, str(work), style,
             self.settings.get("bgm_path", ""), self.volume.value() / 100.0,
             self.settings.get("ffmpeg_path", ""),
+            self.motion.currentData(), self.transition.currentData(),
+            self.transition_len.value(),
             on_progress=self._on_progress, on_progress_pct=self._on_pct,
         )
 
@@ -353,7 +405,27 @@ class RenderStep(QWidget):
             f"{result['duration']:.1f}s · {size_mb:.1f} MB · {result['words']} words highlighted")
         self.result_box.setVisible(True)
         self.log.emit(f"Rendered {result['duration']:.1f}s to {Path(result['path']).name}")
+
+        # anything taken under a licence that asks for a name gets written out
+        # beside the video, while it is still known where each picture came from
+        credits = pool.write_credits(
+            self.project, str(Path(result["path"]).with_suffix(".credits.txt")))
+        if credits:
+            self.log.emit(f"Credits saved to {Path(credits).name}")
+
+        self._forget_hosted()
         self.rendered.emit(result["path"])
+
+    def _forget_hosted(self):
+        """The poster was uploaded so the model could see it. The video exists
+        now, so the upload has no reader left — and the cache that remembers it
+        is shared with every other project, so only this one's is dropped."""
+        posters = [p for style in frames.style_names()
+                   for p in frames.posters_so_far(self.project.id, style).values()
+                   if p]
+        gone = kie_images.forget(posters)
+        if gone:
+            self.log.emit(f"Forgot {gone} hosted sample(s) for this project.")
 
     def _open_folder(self):
         if not self._result:

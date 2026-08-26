@@ -6,14 +6,20 @@ are different things and live on different steps.
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QScrollArea,
-    QTextEdit, QVBoxLayout, QWidget,
+    QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton,
+    QScrollArea, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from app.models_data import new_id
 from app.services import llm, narrators, prompts
+from app.services.ideas import youtube
 from app.services.worker import run_async
+
+MEDIA_FILTER = (
+    "Video and audio (*.mp4 *.mkv *.mov *.webm *.avi *.m4v "
+    "*.mp3 *.wav *.m4a *.aac *.ogg *.opus *.flac);;All files (*)"
+)
 
 
 class SampleRow(QFrame):
@@ -26,7 +32,7 @@ class SampleRow(QFrame):
         lay.setContentsMargins(10, 7, 8, 7)
         lay.setSpacing(8)
 
-        kind = QLabel("link" if sample.get("kind") == "link" else "text")
+        kind = QLabel({"link": "link", "file": "file"}.get(sample.get("kind"), "text"))
         kind.setObjectName("Chip")
         kind.setFixedWidth(46)
         kind.setAlignment(Qt.AlignCenter)
@@ -124,6 +130,11 @@ class NarratorsDialog(QDialog):
         self.link_btn = QPushButton("From a video link…")
         self.link_btn.setToolTip("Downloads the audio and transcribes it as a sample")
         self.link_btn.clicked.connect(self.add_link)
+        self.file_btn = QPushButton("From a file…")
+        self.file_btn.setToolTip(
+            "Transcribes a video or audio file from disk — the one route that "
+            "does not depend on YouTube")
+        self.file_btn.clicked.connect(self.add_file)
         self.analyse_btn = QPushButton("Analyse style")
         self.analyse_btn.setObjectName("Primary")
         self.analyse_btn.setMinimumWidth(130)
@@ -132,6 +143,7 @@ class NarratorsDialog(QDialog):
         self.delete_btn.clicked.connect(self.delete_current)
         buttons.addWidget(self.paste_btn)
         buttons.addWidget(self.link_btn)
+        buttons.addWidget(self.file_btn)
         buttons.addStretch(1)
         buttons.addWidget(self.delete_btn)
         buttons.addWidget(self.analyse_btn)
@@ -195,7 +207,7 @@ class NarratorsDialog(QDialog):
     def _render(self):
         builtin = bool(self.current.get("builtin"))
         self.name.setText(self.current.get("name", ""))
-        for widget in (self.name, self.paste_btn, self.link_btn,
+        for widget in (self.name, self.paste_btn, self.link_btn, self.file_btn,
                        self.analyse_btn, self.delete_btn):
             widget.setEnabled(not builtin)
 
@@ -280,6 +292,15 @@ class NarratorsDialog(QDialog):
         self._set_busy(False)
         self._store_samples(self.current.get("samples", []) + [sample])
 
+    def add_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Video or audio file", "", MEDIA_FILTER)
+        if not path:
+            return
+        self._set_busy(True, "Reading the file")
+        run_async(self, narrators.transcribe_file, self._on_link, self._fail,
+                  path, self.settings, on_progress=self._on_progress)
+
     def remove_sample(self, index: int):
         samples = list(self.current.get("samples", []))
         if 0 <= index < len(samples):
@@ -305,7 +326,7 @@ class NarratorsDialog(QDialog):
     def _set_busy(self, busy: bool, message: str = ""):
         self.progress.setVisible(busy)
         for widget in (self.list, self.name, self.paste_btn, self.link_btn,
-                       self.analyse_btn, self.delete_btn):
+                       self.file_btn, self.analyse_btn, self.delete_btn):
             widget.setEnabled(not busy)
         if busy:
             self._elapsed = 0
@@ -327,6 +348,11 @@ class NarratorsDialog(QDialog):
 
     def _fail(self, message: str):
         self._set_busy(False)
+        if youtube.BOT_CHECK_MARK in message:
+            # a dead end is useless on its own — point at the way round it
+            self.status.setText("YouTube asked for a login. Add the file instead →")
+            self.file_btn.setFocus()
+            return
         self.status.setText(message[:160])
 
     def analyse(self):

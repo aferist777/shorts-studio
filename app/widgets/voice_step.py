@@ -4,6 +4,7 @@ Synthesis also produces per-word timings; those are what the render step turns
 into karaoke subtitles, so they are stored on the scene, not thrown away.
 """
 
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
@@ -17,16 +18,48 @@ from app.paths import CACHE_DIR, project_dir
 from app.services import tts
 from app.services.worker import run_async
 
+# Edge drops a stream every so often and calls it "no audio received". It is
+# not the text — the same scene goes through on the next try — so one scene is
+# worth asking twice before a whole run is called off.
+ATTEMPTS = 2
+RETRY_PAUSE = 1.5
 
-def _synthesize_all(texts: list, engine: str, voice: str, rate: str,
-                    out_dir: str, ffmpeg_path: str, progress=None) -> list:
-    """Sequential on purpose — Edge throttles parallel connections."""
+
+def _synthesize_all(jobs: list, engine: str, voice: str, rate: str,
+                    out_dir: str, ffmpeg_path: str, progress=None,
+                    on_item=None) -> list:
+    """Sequential on purpose — Edge throttles parallel connections.
+
+    Each scene is handed back the moment it exists rather than at the end. Edge
+    drops a stream every so often for no reason it will name, and a run that
+    kept its results to itself threw away everything it had already made.
+
+    `jobs` carry the scene's own index: a run that is picking up where the last
+    one stopped is not working through the list from the top.
+    """
     results = []
-    for i, text in enumerate(texts):
+    for done, job in enumerate(jobs):
+        index, text = job["index"], job["text"]
         if progress:
-            progress(f"Scene {i + 1} of {len(texts)}")
-        out = str(Path(out_dir) / f"scene_{i + 1:02d}.mp3")
-        results.append(tts.synthesize(engine, text, voice, rate, out, ffmpeg_path))
+            progress(f"Scene {index + 1} · {done + 1} of {len(jobs)}")
+        out = str(Path(out_dir) / f"scene_{index + 1:02d}.mp3")
+        for attempt in range(1, ATTEMPTS + 1):
+            try:
+                result = tts.synthesize(engine, text, voice, rate, out, ffmpeg_path)
+                break
+            except Exception as failure:
+                if attempt == ATTEMPTS:
+                    # which scene it was is the first thing you need to know,
+                    # and the backend has no idea it is one of nineteen
+                    raise RuntimeError(
+                        f"Scene {index + 1}, {ATTEMPTS} tries: {failure}") from failure
+                if progress:
+                    progress(f"Scene {index + 1} · refused, asking again")
+                time.sleep(RETRY_PAUSE)
+        result = {**result, "index": index, "attempts": attempt}
+        results.append(result)
+        if on_item:
+            on_item(result)
     return results
 
 
@@ -39,6 +72,7 @@ class SceneAudioRow(QFrame):
         self.setObjectName("SceneCard")
         self.index = index
         self.scene = scene
+        self.locked = False
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 8, 10, 8)
@@ -82,12 +116,14 @@ class SceneAudioRow(QFrame):
         self.snippet.setText(text[:70] + "…" if len(text) > 70 else text)
         has_audio = bool(self.scene.audio_path) and Path(self.scene.audio_path).exists()
         self.duration.setText(f"{self.scene.duration:.1f}s" if has_audio else "—")
-        self.play.setEnabled(has_audio)
+        # one place decides what the buttons do, so a row refreshed mid-run
+        # cannot quietly hand back a control the run had disabled
+        self.play.setEnabled(has_audio and not self.locked)
+        self.resynth.setEnabled(not self.locked)
 
     def set_locked(self, locked: bool):
-        self.resynth.setEnabled(not locked)
-        self.play.setEnabled(not locked and bool(self.scene.audio_path)
-                             and Path(self.scene.audio_path).exists())
+        self.locked = locked
+        self.refresh()
 
 
 class VoiceStep(QWidget):
@@ -105,6 +141,7 @@ class VoiceStep(QWidget):
         self._resynth_index = -1
         self._loading_voices = False
         self._voice_language = ""
+        self._voice_in_flight = ""
 
         self._player = QMediaPlayer(self)
         self._audio_out = QAudioOutput(self)
@@ -230,6 +267,7 @@ class VoiceStep(QWidget):
             self.voice.setCurrentIndex(idx)
         self.voice.blockSignals(False)
         self._set_busy(False)
+        self._sync_button()
         if not voices:
             self.log.emit("No voices returned for this language.")
 
@@ -240,15 +278,70 @@ class VoiceStep(QWidget):
         self.settings["tts_rate"] = self.rate.currentText()
         from app.config import save_settings
         save_settings(self.settings)
+        # a different voice makes every scene stale, and the button says so
+        self._sync_button()
+
+    # ---- what is still owed ------------------------------------------------
+
+    def _pending(self) -> list:
+        """Scene indexes with no usable track in the voice now selected."""
+        voice_id = self.voice.currentData()
+        return [
+            i for i, scene in enumerate(self.project.scenes if self.project else [])
+            if not (scene.audio_path and Path(scene.audio_path).exists()
+                    and scene.voice == voice_id)
+        ]
+
+    def _sync_button(self):
+        """One button, and what it says is what it will do.
+
+        Edge drops a scene now and then, and redoing the fourteen that worked to
+        get at the one that did not is both slow and pointless.
+        """
+        scenes = self.project.scenes if self.project else []
+        if not scenes:
+            self.synth_btn.setText("Voice all scenes")
+            self.synth_btn.setToolTip("")
+            return
+        pending = self._pending()
+        if not pending:
+            self.synth_btn.setText("Re-voice all scenes")
+            self.synth_btn.setToolTip("Every scene already has this voice")
+        elif len(pending) == len(scenes):
+            self.synth_btn.setText("Voice all scenes")
+            self.synth_btn.setToolTip("")
+        else:
+            self.synth_btn.setText(f"Voice the rest · {len(pending)}")
+            self.synth_btn.setToolTip(
+                "Picks up where it stopped — the scenes already voiced are left alone")
 
     # ---- project binding ---------------------------------------------------
 
     def set_project(self, project):
         self.project = project
         self._rebuild_rows()
+        self._sync_button()
         # the list is language-specific, so a project in another language needs a refetch
         if project and project.language != self._voice_language:
             self.reload_voices()
+
+    def sync(self):
+        """Catch up with a scene list that changed while this step was off screen.
+
+        The script is written after this step has already been handed the
+        project, so the scenes it must show simply did not exist yet when it
+        was told about them.
+        """
+        scenes = self.project.scenes if self.project else []
+        same = (len(self._rows) == len(scenes)
+                and all(row.scene is scene for row, scene in zip(self._rows, scenes)))
+        if same:
+            for row in self._rows:
+                row.refresh()      # same scenes, but their text may have been edited
+            self._update_total()
+        else:
+            self._rebuild_rows()
+        self._sync_button()
 
     def shutdown(self):
         """Tear the media player down before Qt does — otherwise the Windows
@@ -313,6 +406,13 @@ class VoiceStep(QWidget):
         self._set_busy(False)
         self.status.setText("Failed — see log")
         self.log.emit(f"ERROR  {message}")
+        # whatever was voiced before it broke is kept and shown; the button now
+        # offers to carry on from there rather than start again
+        self.sync()
+        left = len(self._pending())
+        if self.project and self.project.scenes and left:
+            self.log.emit(f"{len(self.project.scenes) - left} scenes are voiced · "
+                          f"press “Voice the rest” to carry on")
 
     # ---- playback ----------------------------------------------------------
 
@@ -325,6 +425,10 @@ class VoiceStep(QWidget):
         scene = self.project.scenes[index]
         if scene.audio_path and Path(scene.audio_path).exists():
             self._play_file(scene.audio_path)
+
+    def stop_playback(self):
+        """Leaving this step should not leave a voice talking behind you."""
+        self._player.stop()
 
     def preview_voice(self):
         voice_id = self.voice.currentData()
@@ -353,32 +457,60 @@ class VoiceStep(QWidget):
             self.log.emit("Pick a voice first.")
             return
 
+        # what is still owed, or everything if nothing is
+        todo = self._pending() or list(range(len(self.project.scenes)))
+        jobs = [{"index": i, "text": self.project.scenes[i].text} for i in todo]
+        self._voice_in_flight = voice_id
+
         self._persist()
         self._set_busy(True, "Voicing scenes")
-        self.log.emit(f"Voice · {self.engine.currentData()} · {self.voice.currentText()}")
+        self.log.emit(f"Voice · {self.engine.currentData()} · {self.voice.currentText()} · "
+                      f"{len(jobs)} of {len(self.project.scenes)} scenes")
         run_async(
-            self, _synthesize_all, self._on_all_done, self._fail,
-            [s.text for s in self.project.scenes],
+            self, _synthesize_all, self._on_all_done, self._fail, jobs,
             self.engine.currentData(), voice_id, self.rate.currentText(),
             str(project_dir(self.project.id)), self.settings.get("ffmpeg_path", ""),
-            on_progress=self._on_progress,
+            on_progress=self._on_progress, on_item=self._on_item,
         )
 
+    def _on_item(self, result: dict):
+        """One scene, the moment it is made — not when the last one is."""
+        index = result.get("index", -1)
+        if not self.project or not 0 <= index < len(self.project.scenes):
+            return
+        scene = self.project.scenes[index]
+        scene.audio_path = result["path"]
+        scene.duration = result["duration"]
+        scene.words = result["words"]
+        scene.voice = self._voice_in_flight
+        if index < len(self._rows):
+            self._rows[index].refresh()
+        self._update_total()
+        self._sync_button()
+        if result.get("attempts", 1) > 1:
+            # worth saying out loud: it is the difference between a quiet
+            # network and one you may want to stop trusting
+            self.log.emit(f"Scene {index + 1} · went through on try "
+                          f"{result['attempts']}")
+        # saved per scene: a run that dies on the fourteenth keeps the thirteen
+        self.projectChanged.emit()
+
     def _on_all_done(self, results: list):
-        voice_id = self.voice.currentData()
-        for scene, result in zip(self.project.scenes, results):
-            scene.audio_path = result["path"]
-            scene.duration = result["duration"]
-            scene.words = result["words"]
-            scene.voice = voice_id
-        for row in self._rows:
-            row.refresh()
+        for result in results:
+            index = result.get("index", -1)
+            if 0 <= index < len(self.project.scenes) and \
+                    not self.project.scenes[index].audio_path:
+                self._on_item(result)   # only if the live channel missed one
+        self.sync()          # rows, not just their contents — the list may be new
         self._set_busy(False)
         self._update_total()
         self.projectChanged.emit()
-        total = sum(s.duration for s in self.project.scenes)
-        words = sum(len(s.words) for s in self.project.scenes)
-        self.log.emit(f"Voiced {len(results)} scenes · {total:.1f}s · {words} word timings")
+        voiced = [s for s in self.project.scenes if s.audio_path]
+        total = sum(s.duration for s in voiced)
+        words = sum(len(s.words) for s in voiced)
+        self.log.emit(f"Voiced {len(results)} scenes · {len(voiced)}/"
+                      f"{len(self.project.scenes)} done · {total:.1f}s · "
+                      f"{words} word timings")
 
     def resynth_scene(self, index: int):
         voice_id = self.voice.currentData()
@@ -401,8 +533,10 @@ class VoiceStep(QWidget):
         scene.duration = result["duration"]
         scene.words = result["words"]
         scene.voice = self.voice.currentData()
-        self._rows[i].refresh()
+        if i < len(self._rows):
+            self._rows[i].refresh()
         self._set_busy(False)
         self._update_total()
+        self._sync_button()
         self.projectChanged.emit()
         self.log.emit(f"Scene {i + 1} voiced · {result['duration']:.1f}s")

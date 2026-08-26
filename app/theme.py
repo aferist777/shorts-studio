@@ -90,6 +90,39 @@ def qss() -> str:
         color: {C['ink_mute']}; border-color: {C['line_soft']}; background: {C['bg']};
     }}
 
+    /* Qt gives tooltips the system palette unless told otherwise, which on
+       Windows means black on white in the middle of a dark window */
+    QToolTip {{
+        background: {C['surface2']}; color: {C['ink_dim']};
+        border: 1px solid {C['line']}; border-radius: 6px;
+        padding: 5px 8px; font-size: 12px;
+    }}
+
+    /* the spoken line under a scene: readable, but never louder than the
+       controls it sits beneath */
+    QLabel#SceneLine {{ color: {C['ink_dim']}; font-size: 12px; }}
+
+    /* the tick on a chosen picture — it sits on the image itself, so it needs
+       its own dark disc or it vanishes into whatever is underneath */
+    QCheckBox#TileMark::indicator {{
+        width: 18px; height: 18px; border-radius: 9px;
+        border: 2px solid rgba(12, 12, 18, 0.8); background: {C['accent']};
+    }}
+    QCheckBox#TileMark::indicator:checked {{ background: {C['accent']}; }}
+
+    /* the x on a kept piece — solid, so it reads over any thumbnail */
+    QPushButton#CardClose {{
+        padding: 0; border: none; border-radius: 9px;
+        background: rgba(12, 12, 18, 0.78); color: {C['ink']};
+        font-weight: 700; font-size: 12px;
+    }}
+    QPushButton#CardClose:hover {{ background: {C['bad']}; color: #ffffff; }}
+
+    /* the strip that says whether you are on voices or on footage */
+    QWidget#ModeBar {{
+        background: {C['surface']}; border-bottom: 1px solid {C['line_soft']};
+    }}
+
     QPushButton#GBtn {{
         padding: 0; min-width: 26px; max-width: 26px; min-height: 26px; max-height: 26px;
         border: 1px solid {C['line']}; border-radius: 6px; color: {C['ink_mute']};
@@ -246,6 +279,30 @@ def qss() -> str:
     }}
     QListWidget::item:hover {{ background: {C['surface']}; color: {C['ink']}; }}
     QListWidget::item:selected {{ background: {C['accent_dim']}; color: {C['ink']}; }}
+
+    /* a list you scan rather than read — the scene column in Gen frames. The
+       rule above is shared with the library, the narrators and ideas, so this
+       one is scoped instead of loosening theirs. */
+    /* the × on a poster, and the preview that hovering one puts on screen */
+    QPushButton#ShotDrop {{
+        padding: 0; border: none; border-radius: 7px;
+        background: {C['bg']}; color: {C['ink']};
+        font-size: 11px; font-weight: 700;
+    }}
+    QPushButton#ShotDrop:hover {{ background: {C['accent']}; color: {C['bg']}; }}
+    QLabel#Magnifier {{
+        background: {C['bg']}; border: 1px solid {C['line']}; border-radius: 8px;
+    }}
+
+    /* the quiet row that opens a scene's frames — a control, not a button */
+    QPushButton#Disclose {{
+        background: transparent; border: none; padding: 1px 2px;
+        color: {C['ink_mute']}; font-size: 11px; text-align: left;
+    }}
+    QPushButton#Disclose:hover {{ color: {C['accent']}; }}
+
+    QListWidget#CompactList {{ padding: 3px; font-size: 11px; }}
+    QListWidget#CompactList::item {{ padding: 1px 8px; }}
 
     QDialog {{ background: {C['surface']}; }}
     QDialog QLabel#DlgTitle {{ font-size: 14px; font-weight: 600; }}
